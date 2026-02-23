@@ -88,7 +88,10 @@ const resolveSubMenuResponse = (subMenus, menuId) => {
     return { text, hasNestedMenu: false };
 };
 
-const sendGreetingAndMainMenu = async (sock, jid, cmsData, quotedMsg = null) => {
+const sendGreetingAndMainMenu = async (sock, msg, cmsData) => {
+    const jid = msg?.key?.remoteJid;
+    if (!jid) return;
+
     if (cmsData.greetingMessage) {
         await sock.sendMessage(jid, { text: cmsData.greetingMessage });
     }
@@ -103,17 +106,19 @@ const sendGreetingAndMainMenu = async (sock, jid, cmsData, quotedMsg = null) => 
 
     await sendListMessage(
         sock,
-        jid,
+        msg,
         'Layanan Publik',
         'Silakan pilih layanan yang Anda butuhkan.',
         'Smart Public Service',
         'Pilih Layanan',
-        sections,
-        null
+        sections
     );
 };
 
-const processWargaInput = async (sock, jid, selectedId, text, cmsData, quotedMsg = null) => {
+const processWargaInput = async (sock, msg, selectedId, text, cmsData) => {
+    const jid = msg?.key?.remoteJid;
+    if (!jid) return;
+
     if (!selectedId && !text) return;
 
     const normalizedSelectedId = selectedId || text.toLowerCase().replace(/\s+/g, '_');
@@ -131,13 +136,12 @@ const processWargaInput = async (sock, jid, selectedId, text, cmsData, quotedMsg
     if (response.hasNestedMenu) {
         await sendListMessage(
             sock,
-            jid,
+            msg,
             response.nestedTitle,
             'Pilih sub-layanan di bawah ini:',
             response.nestedFooter,
             response.nestedButtonText,
-            [{ title: 'Sub Menu', rows: response.nestedMenu }],
-            null
+            [{ title: 'Sub Menu', rows: response.nestedMenu }]
         );
     }
 };
@@ -151,61 +155,31 @@ const handleWargaMessage = async (sock, msg, bodyText = '') => {
 
     if (!text) return;
 
-    if (normalizedText === 'halo') {
-        await sock.sendMessage(jid, {
-            text: 'Halo. Ini dummy menu untuk pengecekan list button.',
-        });
-
-        try {
-            await sendListMessage(
-                sock,
-                jid,
-                'Dummy Menu',
-                'Silakan pilih salah satu menu dummy.',
-                'Smart Public Service',
-                'Pilih Menu',
-                [
-                    {
-                        title: 'Dummy Section',
-                        rows: [
-                            {
-                                id: 'dummy_menu_1',
-                                title: 'Dummy Menu 1',
-                                description: 'Menu uji coba pertama',
-                            },
-                            {
-                                id: 'dummy_menu_2',
-                                title: 'Dummy Menu 2',
-                                description: 'Menu uji coba kedua',
-                            },
-                        ],
-                    },
-                ],
-                null
-            );
-        } catch (error) {
-            console.error('[HALO_LIST_SEND_ERROR]', error);
-            await sock.sendMessage(jid, {
-                text: 'Pesan halo diterima, tapi list button gagal dikirim.',
-            });
-        }
-        return;
-    }
-
     const cmsData = await loadCmsData();
     const timeoutSeconds = Number(cmsData.timeoutSeconds) > 0 ? Number(cmsData.timeoutSeconds) : 30;
-
     const existingSession = sessions.get(jid);
 
-    if (!existingSession) {
-        sessions.set(jid, { startedAt: Date.now(), timeoutSeconds, timeoutId: null });
-        await sendGreetingAndMainMenu(sock, jid, cmsData, null);
+    if (normalizedText === 'halo') {
+        sessions.set(jid, {
+            ...(existingSession || {}),
+            startedAt: existingSession?.startedAt || Date.now(),
+            timeoutSeconds,
+            timeoutId: existingSession?.timeoutId || null,
+        });
+        await sendGreetingAndMainMenu(sock, msg, cmsData);
         scheduleSessionTimeout(sock, jid, timeoutSeconds);
         return;
     }
 
+    if (!existingSession) {
+        await sock.sendMessage(jid, {
+            text: 'Ketik *halo* untuk memulai dan melihat daftar layanan.',
+        });
+        return;
+    }
+
     scheduleSessionTimeout(sock, jid, timeoutSeconds);
-    await processWargaInput(sock, jid, text, text, cmsData, null);
+    await processWargaInput(sock, msg, text, text, cmsData);
     scheduleSessionTimeout(sock, jid, timeoutSeconds);
 };
 
