@@ -6,7 +6,7 @@ const {
     DisconnectReason,
     useMultiFileAuthState,
     fetchLatestBaileysVersion,
-} = require('@whiskeysockets/baileys');
+} = require('baileys-mod'); // <--- UDAH DIGANTI DI SINI 😁
 const { registerRoutes } = require('./src/routes');
 
 const AUTH_DIR = path.join(__dirname, 'session');
