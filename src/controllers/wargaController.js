@@ -1,0 +1,211 @@
+const fs = require('fs/promises');
+const path = require('path');
+const { sendListMessage, extractMessageText, extractSelectedId } = require('../utils/messageHelper');
+
+const CMS_DATA_PATH = path.join(__dirname, '../config/cms-data.json');
+const sessions = new Map();
+
+const TIMEOUT_TEXT = 'Terima kasih telah menghubungi kami. Sesi Anda telah berakhir karena tidak ada aktivitas. Silakan kirim pesan lagi untuk memulai sesi baru.';
+
+const loadCmsData = async () => {
+    const raw = await fs.readFile(CMS_DATA_PATH, 'utf-8');
+    return JSON.parse(raw);
+};
+
+const clearSessionTimer = (jid) => {
+    const session = sessions.get(jid);
+    if (!session?.timeoutId) return;
+    clearTimeout(session.timeoutId);
+};
+
+const endSession = async (sock, jid, sendTimeoutMessage = false) => {
+    clearSessionTimer(jid);
+    sessions.delete(jid);
+
+    if (sendTimeoutMessage) {
+        await sock.sendMessage(jid, { text: TIMEOUT_TEXT });
+    }
+};
+
+const scheduleSessionTimeout = (sock, jid, timeoutSeconds) => {
+    clearSessionTimer(jid);
+
+    const timeoutId = setTimeout(async () => {
+        try {
+            await endSession(sock, jid, true);
+        } catch (error) {
+            console.error('[WARGA_TIMEOUT_ERROR]', error);
+        }
+    }, timeoutSeconds * 1000);
+
+    const current = sessions.get(jid) || {};
+    sessions.set(jid, {
+        ...current,
+        timeoutId,
+        timeoutSeconds,
+        updatedAt: Date.now(),
+    });
+};
+
+const buildMainMenuSections = (mainMenu) => {
+    const rows = (Array.isArray(mainMenu) ? mainMenu : []).map((item, index) => ({
+        header: item.header || 'Layanan',
+        title: item.title || `Menu ${index + 1}`,
+        description: item.description || '',
+        id: item.id || `menu_${index + 1}`,
+    }));
+
+    return [{ title: 'Menu Layanan Publik', rows }];
+};
+
+const resolveSubMenuResponse = (subMenus, menuId) => {
+    const menuData = subMenus?.[menuId];
+    if (!menuData) return null;
+
+    if (typeof menuData === 'string') {
+        return { text: menuData, hasNestedMenu: false };
+    }
+
+    const text = menuData.text || 'Permintaan Anda sedang diproses.';
+    const nestedMenu = menuData.nextMenu;
+
+    if (Array.isArray(nestedMenu) && nestedMenu.length > 0) {
+        return {
+            text,
+            hasNestedMenu: true,
+            nestedMenu,
+            nestedButtonText: menuData.buttonText || 'Pilih Opsi Lanjutan',
+            nestedTitle: menuData.title || 'Sub Menu Layanan',
+            nestedFooter: menuData.footer || 'Silakan pilih layanan berikutnya',
+        };
+    }
+
+    return { text, hasNestedMenu: false };
+};
+
+const sendGreetingAndMainMenu = async (sock, jid, cmsData) => {
+    if (cmsData.greetingMessage) {
+        await sock.sendMessage(jid, { text: cmsData.greetingMessage });
+    }
+
+    const sections = buildMainMenuSections(cmsData.mainMenu);
+    if (!sections[0].rows.length) {
+        await sock.sendMessage(jid, {
+            text: 'Menu layanan belum dikonfigurasi. Silakan hubungi admin.',
+        });
+        return;
+    }
+
+    await sendListMessage(
+        sock,
+        jid,
+        'Layanan Publik',
+        'Silakan pilih layanan yang Anda butuhkan.',
+        'Smart Public Service',
+        'Pilih Layanan',
+        sections
+    );
+};
+
+const processWargaInput = async (sock, jid, selectedId, text, cmsData) => {
+    if (!selectedId && !text) return;
+
+    const normalizedSelectedId = selectedId || text.toLowerCase().replace(/\s+/g, '_');
+    const response = resolveSubMenuResponse(cmsData.subMenus, normalizedSelectedId);
+
+    if (!response) {
+        await sock.sendMessage(jid, {
+            text: 'Input tidak dikenali. Silakan pilih menu yang tersedia.',
+        });
+        return;
+    }
+
+    await sock.sendMessage(jid, { text: response.text });
+
+    if (response.hasNestedMenu) {
+        await sendListMessage(
+            sock,
+            jid,
+            response.nestedTitle,
+            'Pilih sub-layanan di bawah ini:',
+            response.nestedFooter,
+            response.nestedButtonText,
+            [{ title: 'Sub Menu', rows: response.nestedMenu }]
+        );
+    }
+};
+
+const handleWargaMessage = async (sock, msg) => {
+    const jid = msg.key.remoteJid;
+    if (!jid) return;
+
+    const message = msg.message || {};
+    const text = extractMessageText(message);
+    const selectedId = extractSelectedId(message);
+    const normalizedText = (text || '').trim().toLowerCase();
+
+    if (!text && !selectedId) return;
+
+    if (normalizedText === 'halo') {
+        await sock.sendMessage(jid, {
+            text: 'Halo. Ini dummy menu untuk pengecekan list button.',
+        });
+
+        try {
+            await sendListMessage(
+                sock,
+                jid,
+                'Dummy Menu',
+                'Silakan pilih salah satu menu dummy.',
+                'Smart Public Service',
+                'Pilih Menu',
+                [
+                    {
+                        title: 'Dummy Section',
+                        rows: [
+                            {
+                                id: 'dummy_menu_1',
+                                header: 'Dummy',
+                                title: 'Dummy Menu 1',
+                                description: 'Menu uji coba pertama',
+                            },
+                            {
+                                id: 'dummy_menu_2',
+                                header: 'Dummy',
+                                title: 'Dummy Menu 2',
+                                description: 'Menu uji coba kedua',
+                            },
+                        ],
+                    },
+                ]
+            );
+        } catch (error) {
+            console.error('[HALO_LIST_SEND_ERROR]', error);
+            await sock.sendMessage(jid, {
+                text: 'Pesan halo diterima, tapi list button gagal dikirim.',
+            });
+        }
+        return;
+    }
+
+    const cmsData = await loadCmsData();
+    const timeoutSeconds = Number(cmsData.timeoutSeconds) > 0 ? Number(cmsData.timeoutSeconds) : 30;
+
+    const existingSession = sessions.get(jid);
+
+    if (!existingSession) {
+        sessions.set(jid, { startedAt: Date.now(), timeoutSeconds, timeoutId: null });
+        await sendGreetingAndMainMenu(sock, jid, cmsData);
+        scheduleSessionTimeout(sock, jid, timeoutSeconds);
+        return;
+    }
+
+    scheduleSessionTimeout(sock, jid, timeoutSeconds);
+    await processWargaInput(sock, jid, selectedId, text, cmsData);
+    scheduleSessionTimeout(sock, jid, timeoutSeconds);
+};
+
+module.exports = {
+    handleWargaMessage,
+    sessions,
+};
