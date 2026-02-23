@@ -14,7 +14,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "baileys-mod": "^6.8.5",
+    "@whiskeysockets/baileys": "github:xyroorynzz/baileys",
     "cheerio": "^1.2.0",
     "jimp": "^0.16.13",
     "pino": "^10.3.1",

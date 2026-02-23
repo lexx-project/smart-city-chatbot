@@ -92,10 +92,6 @@ const sendGreetingAndMainMenu = async (sock, msg, cmsData) => {
     const jid = msg?.key?.remoteJid;
     if (!jid) return;
 
-    if (cmsData.greetingMessage) {
-        await sock.sendMessage(jid, { text: cmsData.greetingMessage });
-    }
-
     const sections = buildMainMenuSections(cmsData.mainMenu);
     if (!sections[0].rows.length) {
         await sock.sendMessage(jid, {
@@ -104,11 +100,15 @@ const sendGreetingAndMainMenu = async (sock, msg, cmsData) => {
         return;
     }
 
+    // --- FIX UX: Gabung Sapaan dan Teks Utama ke dalam 1 Pesan ---
+    const greetingText = cmsData.greetingMessage ? `${cmsData.greetingMessage}\n\n` : '';
+    const mainText = `${greetingText}Silakan pilih layanan yang Anda butuhkan.`;
+
     await sendListMessage(
         sock,
         msg,
         'Layanan Publik',
-        'Silakan pilih layanan yang Anda butuhkan.',
+        mainText, // Teks sapaan masuk ke sini
         'Smart Public Service',
         'Pilih Layanan',
         sections
