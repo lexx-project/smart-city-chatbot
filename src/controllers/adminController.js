@@ -1,6 +1,6 @@
 const fs = require('fs/promises');
 const path = require('path');
-const { sendListMessage, extractMessageText, extractSelectedId } = require('../utils/messageHelper');
+const { sendListMessage } = require('../utils/messageHelper');
 
 const CMS_DATA_PATH = path.join(__dirname, '../config/cms-data.json');
 const SUPERADMIN_JID = process.env.SUPERADMIN_JID || '6281234567890@s.whatsapp.net';
@@ -23,15 +23,15 @@ const saveCmsData = async (nextData) => {
     await fs.writeFile(CMS_DATA_PATH, JSON.stringify(nextData, null, 2), 'utf-8');
 };
 
-const sendAdminMenu = async (sock, jid) => {
+const sendAdminMenu = async (sock, jid, quotedMsg = null) => {
     const sections = [
         {
             title: 'Pengaturan CMS',
             rows: [
-                { header: 'Sapaan', title: 'Ubah Sapaan Awal', description: 'Ganti pesan sapaan pertama ke warga', id: ADMIN_MENU.UPDATE_GREETING },
-                { header: 'Menu', title: 'Ubah List Menu Utama', description: 'Perbarui daftar menu utama', id: ADMIN_MENU.UPDATE_MAIN_MENU },
-                { header: 'Sub-Menu', title: 'Ubah Respon Sub-Menu', description: 'Perbarui respon per sub-menu', id: ADMIN_MENU.UPDATE_SUBMENU },
-                { header: 'Timeout', title: 'Ubah Waktu Timeout (Detik)', description: 'Atur batas waktu sesi warga', id: ADMIN_MENU.UPDATE_TIMEOUT },
+                { title: 'Ubah Sapaan Awal', description: 'Ganti pesan sapaan pertama ke warga', id: ADMIN_MENU.UPDATE_GREETING },
+                { title: 'Ubah List Menu Utama', description: 'Perbarui daftar menu utama', id: ADMIN_MENU.UPDATE_MAIN_MENU },
+                { title: 'Ubah Respon Sub-Menu', description: 'Perbarui respon per sub-menu', id: ADMIN_MENU.UPDATE_SUBMENU },
+                { title: 'Ubah Waktu Timeout (Detik)', description: 'Atur batas waktu sesi warga', id: ADMIN_MENU.UPDATE_TIMEOUT },
             ],
         },
     ];
@@ -43,7 +43,8 @@ const sendAdminMenu = async (sock, jid) => {
         'Pilih pengaturan yang ingin diubah:',
         'Smart Public Service',
         'Pilih Menu',
-        sections
+        sections,
+        null
     );
 };
 
@@ -68,20 +69,42 @@ const handleTimeoutInput = async (sock, jid, text) => {
     });
 };
 
-const handleAdminMessage = async (sock, msg) => {
+const handleAdminMessage = async (sock, msg, bodyText = '') => {
     const jid = msg.key.remoteJid;
     if (!jid) return;
 
     if (jid !== SUPERADMIN_JID) return;
 
-    const message = msg.message || {};
-    const text = extractMessageText(message);
-    const selectedId = extractSelectedId(message);
+    const text = (bodyText || '').trim();
     const adminState = adminSessions.get(jid);
 
     if (text === '!admin') {
         adminSessions.delete(jid);
-        await sendAdminMenu(sock, jid);
+        await sendAdminMenu(sock, jid, null);
+        return;
+    }
+
+    if (text.toLowerCase() === 'halo') {
+        const sections = [
+            {
+                title: 'Dummy Section',
+                rows: [
+                    { title: 'Dummy Menu 1', description: 'Menu uji coba pertama', id: 'dummy_menu_1' },
+                    { title: 'Dummy Menu 2', description: 'Menu uji coba kedua', id: 'dummy_menu_2' },
+                ],
+            },
+        ];
+        await sock.sendMessage(jid, { text: 'Halo Admin. Ini dummy menu untuk pengecekan list button.' });
+        await sendListMessage(
+            sock,
+            jid,
+            'Dummy Menu',
+            'Silakan pilih salah satu menu dummy.',
+            'Smart Public Service',
+            'Pilih Menu',
+            sections,
+            null
+        );
         return;
     }
 
@@ -90,9 +113,9 @@ const handleAdminMessage = async (sock, msg) => {
         return;
     }
 
-    if (!selectedId) return;
+    if (!text) return;
 
-    switch (selectedId) {
+    switch (text) {
         case ADMIN_MENU.UPDATE_TIMEOUT:
             adminSessions.set(jid, { state: 'awaiting_timeout_seconds' });
             await sock.sendMessage(jid, {

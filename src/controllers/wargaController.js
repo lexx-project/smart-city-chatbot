@@ -1,6 +1,6 @@
 const fs = require('fs/promises');
 const path = require('path');
-const { sendListMessage, extractMessageText, extractSelectedId } = require('../utils/messageHelper');
+const { sendListMessage } = require('../utils/messageHelper');
 
 const CMS_DATA_PATH = path.join(__dirname, '../config/cms-data.json');
 const sessions = new Map();
@@ -49,7 +49,6 @@ const scheduleSessionTimeout = (sock, jid, timeoutSeconds) => {
 
 const buildMainMenuSections = (mainMenu) => {
     const rows = (Array.isArray(mainMenu) ? mainMenu : []).map((item, index) => ({
-        header: item.header || 'Layanan',
         title: item.title || `Menu ${index + 1}`,
         description: item.description || '',
         id: item.id || `menu_${index + 1}`,
@@ -57,6 +56,12 @@ const buildMainMenuSections = (mainMenu) => {
 
     return [{ title: 'Menu Layanan Publik', rows }];
 };
+
+const normalizeRows = (rows) => (Array.isArray(rows) ? rows : []).map((row, index) => ({
+    title: row.title || `Opsi ${index + 1}`,
+    description: row.description || '',
+    id: row.id || `opsi_${index + 1}`,
+}));
 
 const resolveSubMenuResponse = (subMenus, menuId) => {
     const menuData = subMenus?.[menuId];
@@ -73,7 +78,7 @@ const resolveSubMenuResponse = (subMenus, menuId) => {
         return {
             text,
             hasNestedMenu: true,
-            nestedMenu,
+            nestedMenu: normalizeRows(nestedMenu),
             nestedButtonText: menuData.buttonText || 'Pilih Opsi Lanjutan',
             nestedTitle: menuData.title || 'Sub Menu Layanan',
             nestedFooter: menuData.footer || 'Silakan pilih layanan berikutnya',
@@ -83,7 +88,7 @@ const resolveSubMenuResponse = (subMenus, menuId) => {
     return { text, hasNestedMenu: false };
 };
 
-const sendGreetingAndMainMenu = async (sock, jid, cmsData) => {
+const sendGreetingAndMainMenu = async (sock, jid, cmsData, quotedMsg = null) => {
     if (cmsData.greetingMessage) {
         await sock.sendMessage(jid, { text: cmsData.greetingMessage });
     }
@@ -103,11 +108,12 @@ const sendGreetingAndMainMenu = async (sock, jid, cmsData) => {
         'Silakan pilih layanan yang Anda butuhkan.',
         'Smart Public Service',
         'Pilih Layanan',
-        sections
+        sections,
+        null
     );
 };
 
-const processWargaInput = async (sock, jid, selectedId, text, cmsData) => {
+const processWargaInput = async (sock, jid, selectedId, text, cmsData, quotedMsg = null) => {
     if (!selectedId && !text) return;
 
     const normalizedSelectedId = selectedId || text.toLowerCase().replace(/\s+/g, '_');
@@ -130,21 +136,20 @@ const processWargaInput = async (sock, jid, selectedId, text, cmsData) => {
             'Pilih sub-layanan di bawah ini:',
             response.nestedFooter,
             response.nestedButtonText,
-            [{ title: 'Sub Menu', rows: response.nestedMenu }]
+            [{ title: 'Sub Menu', rows: response.nestedMenu }],
+            null
         );
     }
 };
 
-const handleWargaMessage = async (sock, msg) => {
+const handleWargaMessage = async (sock, msg, bodyText = '') => {
     const jid = msg.key.remoteJid;
     if (!jid) return;
 
-    const message = msg.message || {};
-    const text = extractMessageText(message);
-    const selectedId = extractSelectedId(message);
-    const normalizedText = (text || '').trim().toLowerCase();
+    const text = (bodyText || '').trim();
+    const normalizedText = text.toLowerCase();
 
-    if (!text && !selectedId) return;
+    if (!text) return;
 
     if (normalizedText === 'halo') {
         await sock.sendMessage(jid, {
@@ -165,19 +170,18 @@ const handleWargaMessage = async (sock, msg) => {
                         rows: [
                             {
                                 id: 'dummy_menu_1',
-                                header: 'Dummy',
                                 title: 'Dummy Menu 1',
                                 description: 'Menu uji coba pertama',
                             },
                             {
                                 id: 'dummy_menu_2',
-                                header: 'Dummy',
                                 title: 'Dummy Menu 2',
                                 description: 'Menu uji coba kedua',
                             },
                         ],
                     },
-                ]
+                ],
+                null
             );
         } catch (error) {
             console.error('[HALO_LIST_SEND_ERROR]', error);
@@ -195,13 +199,13 @@ const handleWargaMessage = async (sock, msg) => {
 
     if (!existingSession) {
         sessions.set(jid, { startedAt: Date.now(), timeoutSeconds, timeoutId: null });
-        await sendGreetingAndMainMenu(sock, jid, cmsData);
+        await sendGreetingAndMainMenu(sock, jid, cmsData, null);
         scheduleSessionTimeout(sock, jid, timeoutSeconds);
         return;
     }
 
     scheduleSessionTimeout(sock, jid, timeoutSeconds);
-    await processWargaInput(sock, jid, selectedId, text, cmsData);
+    await processWargaInput(sock, jid, text, text, cmsData, null);
     scheduleSessionTimeout(sock, jid, timeoutSeconds);
 };
 

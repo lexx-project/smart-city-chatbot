@@ -1,110 +1,75 @@
 const { generateWAMessageFromContent, proto } = require('@whiskeysockets/baileys');
 
-const unwrapMessage = (message) => {
-    if (!message) return {};
+const buildFallbackMenuText = (title, text, sections) => {
+    const lines = [title, text, ''];
+    const safeSections = Array.isArray(sections) ? sections : [];
 
-    let current = message;
-    let guard = 0;
-
-    while (guard < 5) {
-        if (current.ephemeralMessage?.message) {
-            current = current.ephemeralMessage.message;
-            guard += 1;
-            continue;
+    for (const section of safeSections) {
+        if (section?.title) {
+            lines.push(`${section.title}`);
         }
 
-        if (current.viewOnceMessage?.message) {
-            current = current.viewOnceMessage.message;
-            guard += 1;
-            continue;
+        const rows = Array.isArray(section?.rows) ? section.rows : [];
+        for (const row of rows) {
+            lines.push(`- ${row.title} (${row.id})`);
+            if (row.description) lines.push(`  ${row.description}`);
         }
 
-        if (current.viewOnceMessageV2?.message) {
-            current = current.viewOnceMessageV2.message;
-            guard += 1;
-            continue;
-        }
-
-        if (current.viewOnceMessageV2Extension?.message) {
-            current = current.viewOnceMessageV2Extension.message;
-            guard += 1;
-            continue;
-        }
-
-        break;
+        lines.push('');
     }
 
-    return current;
+    lines.push('Balas dengan ID di dalam kurung untuk memilih menu.');
+    return lines.join('\n').trim();
 };
 
-const sendListMessage = async (sock, jid, title, text, footer, buttonText, sections) => {
-    const msg = generateWAMessageFromContent(jid, {
+const sendListMessage = async (sock, jid, title, text, footer, buttonTitle, sections, quotedMsg = null) => {
+    // sections structure must be: [{ title: "...", highlight_label: "...", rows: [{ title: "...", description: "...", id: "..." }] }]
+    const msg = await generateWAMessageFromContent(jid, {
         viewOnceMessage: {
             message: {
-                messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
+                messageContextInfo: {
+                    deviceListMetadata: {},
+                    deviceListMetadataVersion: 2
+                },
                 interactiveMessage: proto.Message.InteractiveMessage.create({
                     body: proto.Message.InteractiveMessage.Body.create({ text: text }),
                     footer: proto.Message.InteractiveMessage.Footer.create({ text: footer }),
-                    header: proto.Message.InteractiveMessage.Header.create({ title: title, subtitle: "", hasMediaAttachment: false }),
+                    header: proto.Message.InteractiveMessage.Header.create({
+                        title: title,
+                        subtitle: "",
+                        hasMediaAttachment: false
+                    }),
                     nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
-                        buttons: [{
-                            name: "single_select",
-                            buttonParamsJson: JSON.stringify({
-                                title: buttonText,
-                                sections: sections // Array of { title: "Section", rows: [{ header, title, description, id }] }
-                            })
-                        }]
+                        buttons: [
+                            {
+                                name: "single_select",
+                                buttonParamsJson: JSON.stringify({
+                                    title: buttonTitle,
+                                    sections: sections
+                                })
+                            }
+                        ],
                     })
                 })
             }
         }
-    }, {});
-    await sock.relayMessage(jid, msg.message, { messageId: msg.key.id });
-};
+    }, { quoted: quotedMsg });
 
-const extractMessageText = (message) => {
-    const raw = unwrapMessage(message);
+    try {
+        await sock.relayMessage(jid, msg.message, { messageId: msg.key.id });
+        console.log(`[LIST_SENT] jid=${jid} messageId=${msg.key.id} rows=${sections?.[0]?.rows?.length || 0}`);
 
-    return (
-        raw.conversation ||
-        raw.extendedTextMessage?.text ||
-        raw.imageMessage?.caption ||
-        raw.videoMessage?.caption ||
-        raw.buttonsResponseMessage?.selectedDisplayText ||
-        raw.listResponseMessage?.title ||
-        raw.templateButtonReplyMessage?.selectedDisplayText ||
-        ''
-    ).trim();
-};
-
-const extractSelectedId = (message) => {
-    const raw = unwrapMessage(message);
-
-    const fromListResponse = raw.listResponseMessage?.singleSelectReply?.selectedRowId;
-    if (fromListResponse) return fromListResponse;
-
-    const fromButtonsResponse = raw.buttonsResponseMessage?.selectedButtonId;
-    if (fromButtonsResponse) return fromButtonsResponse;
-
-    const fromTemplateButton = raw.templateButtonReplyMessage?.selectedId;
-    if (fromTemplateButton) return fromTemplateButton;
-
-    const nativeFlowJson = raw.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson;
-    if (nativeFlowJson) {
-        try {
-            const parsed = JSON.parse(nativeFlowJson);
-            return (parsed?.id || parsed?.selected_row_id || '').trim();
-        } catch {
-            return '';
+        const shouldFallbackToText = jid.endsWith('@lid') || process.env.FORCE_TEXT_MENU === '1';
+        if (shouldFallbackToText) {
+            await sock.sendMessage(jid, {
+                text: buildFallbackMenuText(title, text, sections),
+            });
+            console.log(`[LIST_FALLBACK_TEXT] jid=${jid} reason=${jid.endsWith('@lid') ? 'lid-client' : 'forced'}`);
         }
+    } catch (error) {
+        console.error('[LIST_ERROR]', error);
+        throw error;
     }
+}
 
-    return '';
-};
-
-module.exports = {
-    sendListMessage,
-    unwrapMessage,
-    extractMessageText,
-    extractSelectedId,
-};
+module.exports = { sendListMessage };

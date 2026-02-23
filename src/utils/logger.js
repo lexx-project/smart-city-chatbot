@@ -1,5 +1,3 @@
-const { extractMessageText, extractSelectedId } = require('./messageHelper');
-
 const C = {
     reset: '\x1b[0m',
     dim: '\x1b[2m',
@@ -17,10 +15,7 @@ const normalizeSender = (jid = '') => jid.replace('@s.whatsapp.net', '').replace
 const logIncomingChat = (msg, roleLabel) => {
     const jid = msg?.key?.remoteJid || '-';
     const sender = normalizeSender(msg?.key?.participant || jid);
-    const message = msg?.message || {};
-    const selectedId = extractSelectedId(message);
-    const text = extractMessageText(message);
-    const payload = selectedId || text || '[non-text]';
+    const payload = (msg?.bodyText || '').trim() || '[non-text]';
     const time = new Date().toLocaleString('id-ID', { hour12: false });
 
     const line =
