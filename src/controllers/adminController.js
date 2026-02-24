@@ -1,6 +1,5 @@
 const fs = require('fs/promises');
 const path = require('path');
-const { sendListMessage } = require('../utils/messageHelper');
 
 const CMS_DATA_PATH = path.join(__dirname, '../config/cms-data.json');
 const SUPERADMIN_JID = process.env.SUPERADMIN_JID || '6281234567890@s.whatsapp.net';
@@ -10,41 +9,32 @@ const loadCmsData = async () => {
     return JSON.parse(raw);
 };
 
-const buildMainMenuSections = (mainMenu) => {
-    const rows = (Array.isArray(mainMenu) ? mainMenu : []).map((item, index) => ({
-        title: item.title || `Menu ${index + 1}`,
-        description: item.description || '',
-        id: item.id || `menu_${index + 1}`,
-    }));
-
-    return [{ title: 'Menu Layanan Publik', rows }];
+const sendTextMenu = async (sock, jid, textBlock, menuArray) => {
+    let message = `${textBlock}\n\n`;
+    (Array.isArray(menuArray) ? menuArray : []).forEach((item, index) => {
+        const num = index + 1;
+        const title = item?.title || `Menu ${num}`;
+        const desc = item?.description ? ` - ${item.description}` : '';
+        message += `*${num}.* ${title}${desc}\n`;
+    });
+    message += '\n👉 Balas dengan angka atau ketik *halo* untuk tampilkan menu lagi.';
+    await sock.sendMessage(jid, { text: message });
 };
 
-const sendMainListMenu = async (sock, msg, cmsData) => {
+const sendMainTextMenu = async (sock, msg, cmsData) => {
     const jid = msg?.key?.remoteJid;
     if (!jid) return;
 
-    const sections = buildMainMenuSections(cmsData.mainMenu);
-    if (!sections[0].rows.length) {
+    const mainMenu = Array.isArray(cmsData.mainMenu) ? cmsData.mainMenu : [];
+    if (!mainMenu.length) {
         await sock.sendMessage(jid, {
             text: 'Menu layanan belum dikonfigurasi. Silakan hubungi admin.',
         });
         return;
     }
 
-    if (cmsData.greetingMessage) {
-        await sock.sendMessage(jid, { text: cmsData.greetingMessage });
-    }
-
-    await sendListMessage(
-        sock,
-        msg,
-        'Layanan Publik',
-        'Silakan pilih layanan yang Anda butuhkan.',
-        'Smart Public Service',
-        'Pilih Layanan',
-        sections
-    );
+    const greeting = cmsData.greetingMessage ? `${cmsData.greetingMessage}\n\n` : '';
+    await sendTextMenu(sock, jid, `${greeting}Daftar layanan saat ini:`, mainMenu);
 };
 
 const handleAdminMessage = async (sock, msg, bodyText = '') => {
@@ -57,7 +47,7 @@ const handleAdminMessage = async (sock, msg, bodyText = '') => {
     if (text.toLowerCase() !== 'halo') return;
 
     const cmsData = await loadCmsData();
-    await sendMainListMenu(sock, msg, cmsData);
+    await sendMainTextMenu(sock, msg, cmsData);
 };
 
 module.exports = {

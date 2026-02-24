@@ -1,6 +1,7 @@
 const fs = require('fs/promises');
 const path = require('path');
-const { sendListMessage } = require('../utils/messageHelper');
+// Import sendListMessage kita matikan sementara karena pakai teks biasa
+// const { sendListMessage } = require('../utils/messageHelper');
 
 const CMS_DATA_PATH = path.join(__dirname, '../config/cms-data.json');
 const sessions = new Map();
@@ -47,105 +48,95 @@ const scheduleSessionTimeout = (sock, jid, timeoutSeconds) => {
     });
 };
 
-// --- FIX 1: Ngebaca mainMenu langsung dari JSON lu ---
-const buildMainMenuSections = (mainMenu) => {
-    const rows = (Array.isArray(mainMenu) ? mainMenu : []).map((item) => ({
-        title: item.title,
-        description: item.description || '',
-        id: item.id,
-    }));
+// --- FUNGSI BARU: Pembuat Menu Teks ---
+const sendTextMenu = async (sock, jid, textBlock, menuArray, session) => {
+    let message = textBlock + "\n\n";
+    let optionsMap = {};
 
-    return [{ title: 'Daftar Layanan', rows }];
+    menuArray.forEach((item, index) => {
+        const num = String(index + 1);
+        // Format teks: 1. Nama Menu
+        message += `*${num}.* ${item.title}\n`;
+        // Simpan pemetaan nomor ke ID menu (misal: "1" -> "menu_kependudukan")
+        optionsMap[num] = item.id;
+    });
+
+    message += "\n👉 *Balas dengan angka (contoh: 1) untuk memilih.*";
+
+    // Simpan optionsMap ke sesi user biar bot tahu nomor 1 itu apa pas dibalas
+    session.currentOptions = optionsMap;
+
+    await sock.sendMessage(jid, { text: message });
 };
 
-// --- FIX 2: Ngebaca nextMenu dari subMenus JSON lu ---
 const resolveSubMenuResponse = (subMenus, menuId) => {
     const menuData = subMenus?.[menuId];
     if (!menuData) return null;
 
-    // Kalau di JSON isinya cuma teks biasa (kayak "menu_pengaduan" atau "dukcapil_ktp")
     if (typeof menuData === 'string') {
         return { text: menuData, hasNestedMenu: false };
     }
 
-    // Kalau di JSON isinya Object dengan "nextMenu" (kayak "menu_kependudukan")
     const text = menuData.text || 'Silakan pilih opsi lanjutan:';
     const nestedMenu = menuData.nextMenu;
 
     if (Array.isArray(nestedMenu) && nestedMenu.length > 0) {
         const rows = nestedMenu.map((row) => ({
             title: row.title,
-            description: row.description || '',
             id: row.id,
         }));
         return {
             text,
             hasNestedMenu: true,
             nestedMenu: rows,
-            nestedButtonText: menuData.buttonText || 'Pilih Opsi',
-            nestedTitle: menuData.title || 'Sub Menu',
         };
     }
 
     return { text, hasNestedMenu: false };
 };
 
-const sendGreetingAndMainMenu = async (sock, msg, cmsData) => {
+const sendGreetingAndMainMenu = async (sock, msg, cmsData, session) => {
     const jid = msg?.key?.remoteJid;
     if (!jid) return;
 
-    const sections = buildMainMenuSections(cmsData.mainMenu);
-    if (!sections[0].rows.length) {
+    if (!cmsData.mainMenu || cmsData.mainMenu.length === 0) {
         await sock.sendMessage(jid, {
             text: 'Menu layanan belum dikonfigurasi. Silakan hubungi admin.',
         });
         return;
     }
 
-    // Gabungin sapaan dan teks utama (tanpa gambar)
     const greetingText = cmsData.greetingMessage ? `${cmsData.greetingMessage}\n\n` : '';
-    const mainText = `${greetingText}Silakan tekan tombol di bawah untuk melihat pilihan layanan.`;
+    const mainText = `${greetingText}Silakan pilih layanan yang Anda butuhkan:`;
 
-    await sendListMessage(
-        sock,
-        msg,
-        'Layanan Publik',
-        mainText,
-        'Smart Public Service',
-        'Pilih Layanan',
-        sections
-    );
+    await sendTextMenu(sock, jid, mainText, cmsData.mainMenu, session);
 };
 
-const processWargaInput = async (sock, msg, selectedId, text, cmsData) => {
+const processWargaInput = async (sock, msg, text, cmsData, session) => {
     const jid = msg?.key?.remoteJid;
     if (!jid) return;
 
-    // Ambil ID dari klik button atau ketikan manual
-    const inputId = selectedId || text;
+    // Cek apakah input warga (angka) ada di pilihan sesi saat ini
+    let inputId = text; 
+    if (session.currentOptions && session.currentOptions[text]) {
+        inputId = session.currentOptions[text];
+    }
+
     const response = resolveSubMenuResponse(cmsData.subMenus, inputId);
 
-    // Kalau input nggak ada di JSON subMenus
     if (!response) {
         await sock.sendMessage(jid, {
-            text: 'Input tidak dikenali. Silakan ketik *halo* untuk kembali ke menu awal.',
+            text: '❌ Pilihan tidak valid. Silakan balas dengan angka yang ada di menu, atau ketik *halo* untuk kembali ke awal.',
         });
         return;
     }
 
-    // Kalau responnya punya sub-menu lagi (List Button kedua)
     if (response.hasNestedMenu) {
-        await sendListMessage(
-            sock,
-            msg,
-            response.nestedTitle,
-            response.text,
-            'Smart Public Service',
-            response.nestedButtonText,
-            [{ title: response.nestedTitle, rows: response.nestedMenu }]
-        );
+        // Render sub-menu dalam bentuk teks
+        await sendTextMenu(sock, jid, response.text, response.nestedMenu, session);
     } else {
-        // Kalau responnya cuma teks balasan akhir
+        // Kalau udah mentok di info akhir, bersihin opsi
+        session.currentOptions = null;
         await sock.sendMessage(jid, { text: response.text });
     }
 };
@@ -154,7 +145,6 @@ const handleWargaMessage = async (sock, msg, bodyText = '') => {
     const jid = msg.key.remoteJid;
     if (!jid) return;
 
-    // bodyText ini nangkep ID dari tombol yang diklik warga (cth: "menu_kependudukan")
     const text = (bodyText || '').trim();
     const normalizedText = text.toLowerCase();
 
@@ -162,22 +152,23 @@ const handleWargaMessage = async (sock, msg, bodyText = '') => {
 
     const cmsData = await loadCmsData();
     const timeoutSeconds = Number(cmsData.timeoutSeconds) > 0 ? Number(cmsData.timeoutSeconds) : 30;
-    const existingSession = sessions.get(jid);
+    let existingSession = sessions.get(jid);
 
-    // Pancingan awal pakai "halo"
     if (normalizedText === 'halo') {
-        sessions.set(jid, {
+        const newSession = {
             ...(existingSession || {}),
             startedAt: existingSession?.startedAt || Date.now(),
             timeoutSeconds,
             timeoutId: existingSession?.timeoutId || null,
-        });
-        await sendGreetingAndMainMenu(sock, msg, cmsData);
+            currentOptions: null // Reset opsi saat mulai baru
+        };
+        sessions.set(jid, newSession);
+        
+        await sendGreetingAndMainMenu(sock, msg, cmsData, newSession);
         scheduleSessionTimeout(sock, jid, timeoutSeconds);
         return;
     }
 
-    // Cegah warga ngirim ID/pesan acak kalau belum ketik halo
     if (!existingSession) {
         await sock.sendMessage(jid, {
             text: 'Sesi belum dimulai. Ketik *halo* untuk memulai dan melihat daftar layanan.',
@@ -185,9 +176,8 @@ const handleWargaMessage = async (sock, msg, bodyText = '') => {
         return;
     }
 
-    // Lempar ID tombol yang diklik ke proses
     scheduleSessionTimeout(sock, jid, timeoutSeconds);
-    await processWargaInput(sock, msg, text, text, cmsData);
+    await processWargaInput(sock, msg, text, cmsData, existingSession);
     scheduleSessionTimeout(sock, jid, timeoutSeconds);
 };
 
