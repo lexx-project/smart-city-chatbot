@@ -6,7 +6,11 @@ const path = require('path');
 const CMS_DATA_PATH = path.join(__dirname, '../config/cms-data.json');
 const sessions = new Map();
 
-const TIMEOUT_TEXT = 'Terima kasih telah menghubungi kami. Sesi Anda telah berakhir karena tidak ada aktivitas. Silakan kirim *halo* lagi untuk memulai sesi baru.';
+const TIMEOUT_TEXT = 'Terima kasih telah menghubungi kami. Sesi Anda telah berakhir karena tidak ada aktivitas. Silakan kirim pesan lagi untuk memulai sesi baru.';
+const SESSION_END_TEXT = 'Terima kasih sudah menggunakan layanan Smart Public Service. Sampai jumpa.';
+const CONTINUE_YES_ID = '__continue_yes';
+const CONTINUE_NO_ID = '__continue_no';
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const loadCmsData = async () => {
     const raw = await fs.readFile(CMS_DATA_PATH, 'utf-8');
@@ -39,13 +43,13 @@ const scheduleSessionTimeout = (sock, jid, timeoutSeconds) => {
         }
     }, timeoutSeconds * 1000);
 
+    // Keep the same session object reference so nested menu option mapping
+    // (currentOptions) is not lost between timer refreshes.
     const current = sessions.get(jid) || {};
-    sessions.set(jid, {
-        ...current,
-        timeoutId,
-        timeoutSeconds,
-        updatedAt: Date.now(),
-    });
+    current.timeoutId = timeoutId;
+    current.timeoutSeconds = timeoutSeconds;
+    current.updatedAt = Date.now();
+    sessions.set(jid, current);
 };
 
 // --- FUNGSI BARU: Pembuat Menu Teks ---
@@ -67,6 +71,19 @@ const sendTextMenu = async (sock, jid, textBlock, menuArray, session) => {
     session.currentOptions = optionsMap;
 
     await sock.sendMessage(jid, { text: message });
+};
+
+const sendCompletionConfirmation = async (sock, jid, session) => {
+    await sendTextMenu(
+        sock,
+        jid,
+        'Apakah Anda ingin melanjutkan transaksi?',
+        [
+            { title: 'Ya, kembali ke menu utama', id: CONTINUE_YES_ID },
+            { title: 'Tidak, selesai', id: CONTINUE_NO_ID },
+        ],
+        session
+    );
 };
 
 const resolveSubMenuResponse = (subMenus, menuId) => {
@@ -114,30 +131,55 @@ const sendGreetingAndMainMenu = async (sock, msg, cmsData, session) => {
 
 const processWargaInput = async (sock, msg, text, cmsData, session) => {
     const jid = msg?.key?.remoteJid;
-    if (!jid) return;
+    if (!jid) return { endSessionNow: false };
+
+    const hasPendingOptions = !!session.currentOptions;
+
+    if (hasPendingOptions && !session.currentOptions[text]) {
+        await sock.sendMessage(jid, {
+            text: '❌ Pilihan tidak valid. Silakan balas dengan angka yang tersedia pada menu.',
+        });
+        return { endSessionNow: false };
+    }
 
     // Cek apakah input warga (angka) ada di pilihan sesi saat ini
-    let inputId = text; 
-    if (session.currentOptions && session.currentOptions[text]) {
+    let inputId = text;
+    if (hasPendingOptions && session.currentOptions[text]) {
         inputId = session.currentOptions[text];
+    }
+
+    if (inputId === CONTINUE_YES_ID) {
+        session.currentOptions = null;
+        await sendGreetingAndMainMenu(sock, msg, cmsData, session);
+        return { endSessionNow: false };
+    }
+
+    if (inputId === CONTINUE_NO_ID) {
+        await sock.sendMessage(jid, { text: SESSION_END_TEXT });
+        await endSession(sock, jid, false);
+        return { endSessionNow: true };
     }
 
     const response = resolveSubMenuResponse(cmsData.subMenus, inputId);
 
     if (!response) {
         await sock.sendMessage(jid, {
-            text: '❌ Pilihan tidak valid. Silakan balas dengan angka yang ada di menu, atau ketik *halo* untuk kembali ke awal.',
+            text: '❌ Pilihan tidak valid. Silakan pilih layanan yang tersedia.',
         });
-        return;
+        return { endSessionNow: false };
     }
 
     if (response.hasNestedMenu) {
         // Render sub-menu dalam bentuk teks
         await sendTextMenu(sock, jid, response.text, response.nestedMenu, session);
+        return { endSessionNow: false };
     } else {
         // Kalau udah mentok di info akhir, bersihin opsi
         session.currentOptions = null;
         await sock.sendMessage(jid, { text: response.text });
+        await wait(3000);
+        await sendCompletionConfirmation(sock, jid, session);
+        return { endSessionNow: false };
     }
 };
 
@@ -150,34 +192,33 @@ const handleWargaMessage = async (sock, msg, bodyText = '') => {
 
     if (!text) return;
 
+    if (normalizedText === '/setting') {
+        await sock.sendMessage(jid, {
+            text: 'Akses ditolak. Fitur /setting hanya untuk admin.',
+        });
+        return;
+    }
+
     const cmsData = await loadCmsData();
     const timeoutSeconds = Number(cmsData.timeoutSeconds) > 0 ? Number(cmsData.timeoutSeconds) : 30;
-    let existingSession = sessions.get(jid);
+    const existingSession = sessions.get(jid);
 
-    if (normalizedText === 'halo') {
+    if (!existingSession) {
         const newSession = {
-            ...(existingSession || {}),
-            startedAt: existingSession?.startedAt || Date.now(),
+            startedAt: Date.now(),
             timeoutSeconds,
-            timeoutId: existingSession?.timeoutId || null,
-            currentOptions: null // Reset opsi saat mulai baru
+            timeoutId: null,
+            currentOptions: null
         };
         sessions.set(jid, newSession);
-        
+
         await sendGreetingAndMainMenu(sock, msg, cmsData, newSession);
         scheduleSessionTimeout(sock, jid, timeoutSeconds);
         return;
     }
 
-    if (!existingSession) {
-        await sock.sendMessage(jid, {
-            text: 'Sesi belum dimulai. Ketik *halo* untuk memulai dan melihat daftar layanan.',
-        });
-        return;
-    }
-
-    scheduleSessionTimeout(sock, jid, timeoutSeconds);
-    await processWargaInput(sock, msg, text, cmsData, existingSession);
+    const result = await processWargaInput(sock, msg, text, cmsData, existingSession);
+    if (result?.endSessionNow) return;
     scheduleSessionTimeout(sock, jid, timeoutSeconds);
 };
 

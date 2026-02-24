@@ -1,4 +1,4 @@
-const { handleAdminMessage, SUPERADMIN_JID } = require('../controllers/adminController');
+const { handleAdminMessage } = require('../controllers/adminController');
 const { handleWargaMessage } = require('../controllers/wargaController');
 const { logIncomingChat } = require('../utils/logger');
 
@@ -88,13 +88,11 @@ const registerRoutes = (sock) => {
                 if (!bodyText) continue;
                 msg.bodyText = bodyText;
 
-                if (jid === SUPERADMIN_JID) {
-                    logIncomingChat(msg, 'SUPERADMIN');
-                    await handleAdminMessage(sock, msg, bodyText);
-                } else {
-                    logIncomingChat(msg, 'WARGA');
-                    await handleWargaMessage(sock, msg, bodyText);
-                }
+                logIncomingChat(msg, 'WARGA');
+                const handledByAdmin = await handleAdminMessage(sock, msg, bodyText);
+                if (handledByAdmin) continue;
+
+                await handleWargaMessage(sock, msg, bodyText);
             } catch (error) {
                 console.error('[ROUTER_MESSAGE_ERROR]', error);
             }

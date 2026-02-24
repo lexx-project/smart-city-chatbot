@@ -1,5 +1,6 @@
 {
-  "greetingMessage": "Halo Warga. Selamat datang di Smart Public Service. Kami siap membantu kebutuhan layanan publik Anda.",
+  "adminJids": [],
+  "greetingMessage": "tes",
   "mainMenu": [
     {
       "id": "menu_kependudukan",
