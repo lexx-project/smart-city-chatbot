@@ -9,6 +9,7 @@ const ADMIN_STATE = {
     IDLE: 'IDLE',
     SETTINGS_MENU: 'SETTINGS_MENU',
     WAITING_GREETING: 'WAITING_GREETING',
+    WAITING_TIMEOUT_SECONDS: 'WAITING_TIMEOUT_SECONDS',
 };
 
 const normalizeToJid = (value = '') => {
@@ -111,10 +112,11 @@ const scheduleAdminFlowTimeout = (sock, jid) => {
     adminSessions.set(jid, current);
 };
 
-const sendSettingsMenu = async (sock, jid) => {
+const sendSettingsMenu = async (sock, jid, cmsData) => {
+    const currentTimeout = Number(cmsData?.timeoutSeconds) > 0 ? Number(cmsData.timeoutSeconds) : 30;
     await sendTextMenu(sock, jid, 'Panel Pengaturan Admin', [
         { title: 'Ubah Pesan Awal Warga', description: 'Edit greeting message saat user pertama chat' },
-        { title: 'Lihat Pesan Awal Saat Ini', description: 'Tampilkan nilai greeting message aktif' },
+        { title: `Ubah Timeout Warga (${currentTimeout} detik)`, description: 'Atur durasi sesi warga sebelum auto-timeout' },
     ]);
     adminSessions.set(jid, { state: ADMIN_STATE.SETTINGS_MENU, timeoutId: null });
     scheduleAdminFlowTimeout(sock, jid);
@@ -197,7 +199,7 @@ const handleAdminMessage = async (sock, msg, bodyText = '') => {
             await sock.sendMessage(jid, { text: 'Akses ditolak. Hanya admin yang bisa mengakses /setting.' });
             return true;
         }
-        await sendSettingsMenu(sock, jid);
+        await sendSettingsMenu(sock, jid, cmsData);
         return true;
     }
 
@@ -240,6 +242,32 @@ const handleAdminMessage = async (sock, msg, bodyText = '') => {
         return true;
     }
 
+    if (session.state === ADMIN_STATE.WAITING_TIMEOUT_SECONDS) {
+        if (!isAdmin) {
+            await sock.sendMessage(jid, { text: 'Akses ditolak. Hanya admin yang bisa mengubah pengaturan.' });
+            return true;
+        }
+
+        const nextTimeout = Number(text);
+        if (!Number.isInteger(nextTimeout) || nextTimeout < 10 || nextTimeout > 3600) {
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, {
+                text: 'Nilai timeout tidak valid. Masukkan angka 10 sampai 3600 detik.',
+            });
+            return true;
+        }
+
+        const cmsData = await loadCmsData();
+        cmsData.timeoutSeconds = nextTimeout;
+        await saveCmsData(cmsData);
+        clearAdminFlowTimer(jid);
+        adminSessions.set(jid, { state: ADMIN_STATE.IDLE, timeoutId: null });
+        await sock.sendMessage(jid, {
+            text: `Berhasil. Timeout sesi warga diubah menjadi ${nextTimeout} detik.`,
+        });
+        return true;
+    }
+
     if (session.state === ADMIN_STATE.SETTINGS_MENU) {
         if (!isAdmin) {
             await sock.sendMessage(jid, { text: 'Akses ditolak. Hanya admin yang bisa mengubah pengaturan.' });
@@ -255,12 +283,11 @@ const handleAdminMessage = async (sock, msg, bodyText = '') => {
         }
 
         if (text === '2') {
-            const cmsData = await loadCmsData();
+            adminSessions.set(jid, { state: ADMIN_STATE.WAITING_TIMEOUT_SECONDS, timeoutId: session.timeoutId || null });
+            scheduleAdminFlowTimeout(sock, jid);
             await sock.sendMessage(jid, {
-                text: `Pesan awal saat ini:\n\n${cmsData.greetingMessage || '(kosong)'}`,
+                text: 'Masukkan timeout baru dalam detik (10-3600). Contoh: 180',
             });
-            clearAdminFlowTimer(jid);
-            adminSessions.set(jid, { state: ADMIN_STATE.IDLE, timeoutId: null });
             return true;
         }
 

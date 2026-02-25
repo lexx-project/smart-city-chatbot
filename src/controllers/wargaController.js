@@ -226,9 +226,6 @@ const processWargaInput = async (sock, msg, text, cmsData, session, sessionKey) 
         if (isLongInputFeature(inputId)) {
             session.awaitingLongInputFor = inputId;
             session.timeoutSeconds = LONG_INPUT_TIMEOUT_SECONDS;
-            await sock.sendMessage(jid, {
-                text: `Silakan tulis detail Anda. Waktu maksimal ${LONG_INPUT_TIMEOUT_SECONDS} detik sebelum sesi berakhir.`,
-            });
             return { endSessionNow: false };
         }
 
