@@ -4,7 +4,9 @@ const path = require('path');
 // const { sendListMessage } = require('../utils/messageHelper');
 
 const CMS_DATA_PATH = path.join(__dirname, '../config/cms-data.json');
+const SESSION_DIR = path.join(__dirname, '../../session');
 const sessions = new Map();
+const sessionAliasIndex = new Map();
 
 const TIMEOUT_TEXT = 'Terima kasih telah menghubungi kami. Sesi Anda telah berakhir karena tidak ada aktivitas. Silakan kirim pesan lagi untuk memulai sesi baru.';
 const SESSION_END_TEXT = 'Terima kasih sudah menggunakan layanan Smart Public Service. Sampai jumpa.';
@@ -17,27 +19,75 @@ const loadCmsData = async () => {
     return JSON.parse(raw);
 };
 
-const clearSessionTimer = (jid) => {
-    const session = sessions.get(jid);
+const readJsonStringFile = async (filePath) => {
+    try {
+        const raw = await fs.readFile(filePath, 'utf-8');
+        return JSON.parse(raw);
+    } catch {
+        return '';
+    }
+};
+
+const resolvePhoneFromLid = async (lidLocalId) => {
+    const reversePath = path.join(SESSION_DIR, `lid-mapping-${lidLocalId}_reverse.json`);
+    const mapped = await readJsonStringFile(reversePath);
+    return String(mapped || '').replace(/\D/g, '');
+};
+
+const toSessionKey = async (jid = '') => {
+    const [local = '', domain = ''] = String(jid).split('@');
+    const digits = local.replace(/\D/g, '');
+
+    if (domain === 'lid') {
+        const mappedPhone = await resolvePhoneFromLid(digits);
+        return mappedPhone || digits || String(jid);
+    }
+
+    return digits || String(jid);
+};
+
+const clearSessionTimer = (sessionKey) => {
+    const session = sessions.get(sessionKey);
     if (!session?.timeoutId) return;
     clearTimeout(session.timeoutId);
 };
 
-const endSession = async (sock, jid, sendTimeoutMessage = false) => {
-    clearSessionTimer(jid);
-    sessions.delete(jid);
+const registerSessionAlias = (sessionKey, alias, session) => {
+    if (!alias) return;
+    sessionAliasIndex.set(alias, sessionKey);
+    if (!session._aliases) session._aliases = new Set();
+    session._aliases.add(alias);
+};
+
+const registerAliasesForJid = (sessionKey, jid, session) => {
+    const local = String(jid || '').split('@')[0] || '';
+    registerSessionAlias(sessionKey, jid, session);
+    registerSessionAlias(sessionKey, local, session);
+};
+
+const endSession = async (sock, sessionKey, replyJid, sendTimeoutMessage = false) => {
+    const session = sessions.get(sessionKey);
+    clearSessionTimer(sessionKey);
+    sessions.delete(sessionKey);
+    if (session?._aliases) {
+        for (const alias of session._aliases) {
+            if (sessionAliasIndex.get(alias) === sessionKey) {
+                sessionAliasIndex.delete(alias);
+            }
+        }
+    }
 
     if (sendTimeoutMessage) {
-        await sock.sendMessage(jid, { text: TIMEOUT_TEXT });
+        await sock.sendMessage(replyJid, { text: TIMEOUT_TEXT });
     }
 };
 
-const scheduleSessionTimeout = (sock, jid, timeoutSeconds) => {
-    clearSessionTimer(jid);
+const scheduleSessionTimeout = (sock, sessionKey, replyJid, timeoutSeconds) => {
+    clearSessionTimer(sessionKey);
 
     const timeoutId = setTimeout(async () => {
         try {
-            await endSession(sock, jid, true);
+            await endSession(sock, sessionKey, replyJid, true);
         } catch (error) {
             console.error('[WARGA_TIMEOUT_ERROR]', error);
         }
@@ -45,11 +95,11 @@ const scheduleSessionTimeout = (sock, jid, timeoutSeconds) => {
 
     // Keep the same session object reference so nested menu option mapping
     // (currentOptions) is not lost between timer refreshes.
-    const current = sessions.get(jid) || {};
+    const current = sessions.get(sessionKey) || {};
     current.timeoutId = timeoutId;
     current.timeoutSeconds = timeoutSeconds;
     current.updatedAt = Date.now();
-    sessions.set(jid, current);
+    sessions.set(sessionKey, current);
 };
 
 // --- FUNGSI BARU: Pembuat Menu Teks ---
@@ -129,7 +179,7 @@ const sendGreetingAndMainMenu = async (sock, msg, cmsData, session) => {
     await sendTextMenu(sock, jid, mainText, cmsData.mainMenu, session);
 };
 
-const processWargaInput = async (sock, msg, text, cmsData, session) => {
+const processWargaInput = async (sock, msg, text, cmsData, session, sessionKey) => {
     const jid = msg?.key?.remoteJid;
     if (!jid) return { endSessionNow: false };
 
@@ -156,7 +206,7 @@ const processWargaInput = async (sock, msg, text, cmsData, session) => {
 
     if (inputId === CONTINUE_NO_ID) {
         await sock.sendMessage(jid, { text: SESSION_END_TEXT });
-        await endSession(sock, jid, false);
+        await endSession(sock, sessionKey, jid, false);
         return { endSessionNow: true };
     }
 
@@ -186,6 +236,8 @@ const processWargaInput = async (sock, msg, text, cmsData, session) => {
 const handleWargaMessage = async (sock, msg, bodyText = '') => {
     const jid = msg.key.remoteJid;
     if (!jid) return;
+    const rawSessionKey = await toSessionKey(jid);
+    let sessionKey = rawSessionKey;
 
     const text = (bodyText || '').trim();
     const normalizedText = text.toLowerCase();
@@ -201,25 +253,37 @@ const handleWargaMessage = async (sock, msg, bodyText = '') => {
 
     const cmsData = await loadCmsData();
     const timeoutSeconds = Number(cmsData.timeoutSeconds) > 0 ? Number(cmsData.timeoutSeconds) : 30;
-    const existingSession = sessions.get(jid);
+    let existingSession = sessions.get(sessionKey);
+
+    if (!existingSession) {
+        const local = String(jid).split('@')[0] || '';
+        const aliasedKey = sessionAliasIndex.get(jid) || sessionAliasIndex.get(local);
+        if (aliasedKey && sessions.has(aliasedKey)) {
+            sessionKey = aliasedKey;
+            existingSession = sessions.get(aliasedKey);
+        }
+    }
 
     if (!existingSession) {
         const newSession = {
             startedAt: Date.now(),
             timeoutSeconds,
             timeoutId: null,
-            currentOptions: null
+            currentOptions: null,
+            _aliases: new Set(),
         };
-        sessions.set(jid, newSession);
+        sessions.set(sessionKey, newSession);
+        registerAliasesForJid(sessionKey, jid, newSession);
 
         await sendGreetingAndMainMenu(sock, msg, cmsData, newSession);
-        scheduleSessionTimeout(sock, jid, timeoutSeconds);
+        scheduleSessionTimeout(sock, sessionKey, jid, timeoutSeconds);
         return;
     }
+    registerAliasesForJid(sessionKey, jid, existingSession);
 
-    const result = await processWargaInput(sock, msg, text, cmsData, existingSession);
+    const result = await processWargaInput(sock, msg, text, cmsData, existingSession, sessionKey);
     if (result?.endSessionNow) return;
-    scheduleSessionTimeout(sock, jid, timeoutSeconds);
+    scheduleSessionTimeout(sock, sessionKey, jid, timeoutSeconds);
 };
 
 module.exports = {

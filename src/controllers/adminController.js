@@ -5,6 +5,7 @@ const CMS_DATA_PATH = path.join(__dirname, '../config/cms-data.json');
 const SESSION_DIR = path.join(__dirname, '../../session');
 const SUPERADMIN_JID = process.env.SUPERADMIN_JID || '62882009391607@s.whatsapp.net';
 const adminSessions = new Map();
+const ADMIN_FLOW_TIMEOUT_MS = 60 * 1000;
 
 const ADMIN_STATE = {
     IDLE: 'IDLE',
@@ -87,12 +88,38 @@ const sendTextMenu = async (sock, jid, textBlock, menuArray) => {
     await sock.sendMessage(jid, { text: message });
 };
 
+const clearAdminFlowTimer = (jid) => {
+    const session = adminSessions.get(jid);
+    if (!session?.timeoutId) return;
+    clearTimeout(session.timeoutId);
+};
+
+const scheduleAdminFlowTimeout = (sock, jid) => {
+    clearAdminFlowTimer(jid);
+
+    const timeoutId = setTimeout(async () => {
+        try {
+            adminSessions.set(jid, { state: ADMIN_STATE.IDLE, timeoutId: null });
+            await sock.sendMessage(jid, {
+                text: 'Timeout 60 detik. Proses /setting dibatalkan otomatis.',
+            });
+        } catch (error) {
+            console.error('[ADMIN_TIMEOUT_ERROR]', error);
+        }
+    }, ADMIN_FLOW_TIMEOUT_MS);
+
+    const current = adminSessions.get(jid) || { state: ADMIN_STATE.IDLE };
+    current.timeoutId = timeoutId;
+    adminSessions.set(jid, current);
+};
+
 const sendSettingsMenu = async (sock, jid) => {
     await sendTextMenu(sock, jid, 'Panel Pengaturan Admin', [
         { title: 'Ubah Pesan Awal Warga', description: 'Edit greeting message saat user pertama chat' },
         { title: 'Lihat Pesan Awal Saat Ini', description: 'Tampilkan nilai greeting message aktif' },
     ]);
-    adminSessions.set(jid, { state: ADMIN_STATE.SETTINGS_MENU });
+    adminSessions.set(jid, { state: ADMIN_STATE.SETTINGS_MENU, timeoutId: null });
+    scheduleAdminFlowTimeout(sock, jid);
 };
 
 const isAdminJid = async (jid, cmsData) => {
@@ -161,7 +188,8 @@ const handleAdminMessage = async (sock, msg, bodyText = '') => {
             await sock.sendMessage(jid, { text: 'Akses ditolak. Hanya admin yang bisa menggunakan command ini.' });
             return true;
         }
-        adminSessions.set(jid, { state: ADMIN_STATE.IDLE });
+        clearAdminFlowTimer(jid);
+        adminSessions.set(jid, { state: ADMIN_STATE.IDLE, timeoutId: null });
         await sock.sendMessage(jid, { text: 'Proses admin dibatalkan.' });
         return true;
     }
@@ -206,7 +234,8 @@ const handleAdminMessage = async (sock, msg, bodyText = '') => {
         const cmsData = await loadCmsData();
         cmsData.greetingMessage = text;
         await saveCmsData(cmsData);
-        adminSessions.set(jid, { state: ADMIN_STATE.IDLE });
+        clearAdminFlowTimer(jid);
+        adminSessions.set(jid, { state: ADMIN_STATE.IDLE, timeoutId: null });
         await sock.sendMessage(jid, {
             text: `Berhasil. Pesan awal warga diperbarui menjadi:\n\n${cmsData.greetingMessage}`,
         });
@@ -219,7 +248,8 @@ const handleAdminMessage = async (sock, msg, bodyText = '') => {
             return true;
         }
         if (text === '1') {
-            adminSessions.set(jid, { state: ADMIN_STATE.WAITING_GREETING });
+            adminSessions.set(jid, { state: ADMIN_STATE.WAITING_GREETING, timeoutId: session.timeoutId || null });
+            scheduleAdminFlowTimeout(sock, jid);
             await sock.sendMessage(jid, {
                 text: 'Kirim teks pesan awal baru untuk warga. Ketik */batal* jika ingin membatalkan.',
             });
@@ -231,21 +261,22 @@ const handleAdminMessage = async (sock, msg, bodyText = '') => {
             await sock.sendMessage(jid, {
                 text: `Pesan awal saat ini:\n\n${cmsData.greetingMessage || '(kosong)'}`,
             });
-            adminSessions.set(jid, { state: ADMIN_STATE.IDLE });
+            clearAdminFlowTimer(jid);
+            adminSessions.set(jid, { state: ADMIN_STATE.IDLE, timeoutId: null });
             return true;
         }
 
+        scheduleAdminFlowTimeout(sock, jid);
         await sock.sendMessage(jid, {
             text: 'Pilihan tidak valid. Balas *1* atau *2*.',
         });
         return true;
     }
 
+    // Admin tetap mengikuti alur warga untuk chat normal.
+    // Controller admin hanya meng-handle command khusus admin.
     if (!isAdmin) return false;
-    if (normalized !== 'halo') return false;
-
-    await sendMainTextMenu(sock, msg, cmsData);
-    return true;
+    return false;
 };
 
 module.exports = {
