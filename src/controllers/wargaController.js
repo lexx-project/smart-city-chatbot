@@ -1,123 +1,30 @@
-const fs = require('fs/promises');
-const path = require('path');
-const { SESSION_DIR, DEFAULT_WARGA_TIMEOUT_SECONDS } = require('../../settings');
-// Import sendListMessage kita matikan sementara karena pakai teks biasa
-// const { sendListMessage } = require('../utils/messageHelper');
+const {
+    loadCmsData,
+    getEnabledMainMenu,
+    getTimeoutSeconds,
+    getTimeoutText,
+    getSessionEndText,
+} = require('../services/cmsService');
+const {
+    sessions,
+    registerAliasesForJid,
+    resolveSessionContext,
+    createSession,
+    deleteSession,
+    scheduleSessionTimeout,
+} = require('../services/wargaSessionService');
 
-const CMS_DATA_PATH = path.join(__dirname, '../config/cms-data.json');
-const sessions = new Map();
-const sessionAliasIndex = new Map();
-
-const DEFAULT_TIMEOUT_TEXT = 'Terima kasih telah menghubungi kami. Sesi Anda telah berakhir karena tidak ada aktivitas. Silakan kirim pesan lagi untuk memulai sesi baru.';
-const DEFAULT_SESSION_END_TEXT = 'Terima kasih sudah menggunakan layanan Smart Public Service. Sampai jumpa.';
-
-const loadCmsData = async () => {
-    const raw = await fs.readFile(CMS_DATA_PATH, 'utf-8');
-    return JSON.parse(raw);
-};
-
-const getTimeoutText = (cmsData) => cmsData?.timeoutText || DEFAULT_TIMEOUT_TEXT;
-const getSessionEndText = (cmsData) => cmsData?.sessionEndText || DEFAULT_SESSION_END_TEXT;
-
-const readJsonStringFile = async (filePath) => {
-    try {
-        const raw = await fs.readFile(filePath, 'utf-8');
-        return JSON.parse(raw);
-    } catch {
-        return '';
-    }
-};
-
-const resolvePhoneFromLid = async (lidLocalId) => {
-    const reversePath = path.join(SESSION_DIR, `lid-mapping-${lidLocalId}_reverse.json`);
-    const mapped = await readJsonStringFile(reversePath);
-    return String(mapped || '').replace(/\D/g, '');
-};
-
-const toSessionKey = async (jid = '') => {
-    const [local = '', domain = ''] = String(jid).split('@');
-    const digits = local.replace(/\D/g, '');
-
-    if (domain === 'lid') {
-        const mappedPhone = await resolvePhoneFromLid(digits);
-        return mappedPhone || digits || String(jid);
-    }
-
-    return digits || String(jid);
-};
-
-const clearSessionTimer = (sessionKey) => {
-    const session = sessions.get(sessionKey);
-    if (!session?.timeoutId) return;
-    clearTimeout(session.timeoutId);
-};
-
-const registerSessionAlias = (sessionKey, alias, session) => {
-    if (!alias) return;
-    sessionAliasIndex.set(alias, sessionKey);
-    if (!session._aliases) session._aliases = new Set();
-    session._aliases.add(alias);
-};
-
-const registerAliasesForJid = (sessionKey, jid, session) => {
-    const local = String(jid || '').split('@')[0] || '';
-    registerSessionAlias(sessionKey, jid, session);
-    registerSessionAlias(sessionKey, local, session);
-};
-
-const endSession = async (sock, sessionKey, replyJid, sendTimeoutMessage = false, cmsData = null) => {
-    const session = sessions.get(sessionKey);
-    clearSessionTimer(sessionKey);
-    sessions.delete(sessionKey);
-    if (session?._aliases) {
-        for (const alias of session._aliases) {
-            if (sessionAliasIndex.get(alias) === sessionKey) {
-                sessionAliasIndex.delete(alias);
-            }
-        }
-    }
-
-    if (sendTimeoutMessage) {
-        await sock.sendMessage(replyJid, { text: getTimeoutText(cmsData) });
-    }
-};
-
-const scheduleSessionTimeout = (sock, sessionKey, replyJid, timeoutSeconds, cmsData = null) => {
-    clearSessionTimer(sessionKey);
-
-    const timeoutId = setTimeout(async () => {
-        try {
-            await endSession(sock, sessionKey, replyJid, true, cmsData);
-        } catch (error) {
-            console.error('[WARGA_TIMEOUT_ERROR]', error);
-        }
-    }, timeoutSeconds * 1000);
-
-    // Keep the same session object reference so nested menu option mapping
-    // (currentOptions) is not lost between timer refreshes.
-    const current = sessions.get(sessionKey) || {};
-    current.timeoutId = timeoutId;
-    current.timeoutSeconds = timeoutSeconds;
-    current.updatedAt = Date.now();
-    sessions.set(sessionKey, current);
-};
-
-// --- FUNGSI BARU: Pembuat Menu Teks ---
 const sendTextMenu = async (sock, jid, textBlock, menuArray, session) => {
-    let message = textBlock + "\n\n";
-    let optionsMap = {};
+    let message = `${textBlock}\n\n`;
+    const optionsMap = {};
 
     menuArray.forEach((item, index) => {
         const num = String(index + 1);
-        // Format teks: 1. Nama Menu
         message += `*${num}.* ${item.title}\n`;
-        // Simpan pemetaan nomor ke ID menu (misal: "1" -> "menu_kependudukan")
         optionsMap[num] = item.id;
     });
 
-    message += "\n👉 *Balas dengan angka (contoh: 1) untuk memilih.*";
-
-    // Simpan optionsMap ke sesi user biar bot tahu nomor 1 itu apa pas dibalas
+    message += '\n👉 *Balas dengan angka (contoh: 1) untuk memilih.*';
     session.currentOptions = optionsMap;
 
     await sock.sendMessage(jid, { text: message });
@@ -135,34 +42,41 @@ const resolveSubMenuResponse = (subMenus, menuId) => {
     const nestedMenu = menuData.nextMenu;
 
     if (Array.isArray(nestedMenu) && nestedMenu.length > 0) {
-        const rows = nestedMenu.map((row) => ({
-            title: row.title,
-            id: row.id,
-        }));
         return {
             text,
             hasNestedMenu: true,
-            nestedMenu: rows,
+            nestedMenu: nestedMenu.map((row) => ({ title: row.title, id: row.id })),
         };
     }
 
     return { text, hasNestedMenu: false };
 };
 
-const applySessionTimeout = (sock, sessionKey, jid, session, fallbackTimeoutSeconds, cmsData) => {
-    const timeoutSeconds = Number(session.timeoutSeconds) > 0
-        ? Number(session.timeoutSeconds)
-        : fallbackTimeoutSeconds;
-    scheduleSessionTimeout(sock, sessionKey, jid, timeoutSeconds, cmsData);
+const endSession = async (sock, sessionKey, replyJid, sendTimeoutMessage = false, cmsData = null) => {
+    deleteSession(sessionKey);
+
+    if (sendTimeoutMessage) {
+        await sock.sendMessage(replyJid, { text: getTimeoutText(cmsData) });
+    }
+};
+
+const refreshSessionTimeout = (sock, sessionKey, jid, session, defaultTimeoutSeconds, cmsData) => {
+    const timeoutSeconds = Number(session.timeoutSeconds) > 0 ? Number(session.timeoutSeconds) : defaultTimeoutSeconds;
+
+    scheduleSessionTimeout(sessionKey, timeoutSeconds, async () => {
+        try {
+            await endSession(sock, sessionKey, jid, true, cmsData);
+        } catch (error) {
+            console.error('[WARGA_TIMEOUT_ERROR]', error);
+        }
+    });
 };
 
 const sendGreetingAndMainMenu = async (sock, msg, cmsData, session) => {
     const jid = msg?.key?.remoteJid;
     if (!jid) return;
 
-    const enabledMainMenu = (Array.isArray(cmsData.mainMenu) ? cmsData.mainMenu : [])
-        .filter((item) => item?.enabled !== false);
-
+    const enabledMainMenu = getEnabledMainMenu(cmsData);
     if (!enabledMainMenu.length) {
         await sock.sendMessage(jid, {
             text: 'Menu layanan belum dikonfigurasi. Silakan hubungi admin.',
@@ -189,12 +103,7 @@ const processWargaInput = async (sock, msg, text, cmsData, session, sessionKey) 
         return { endSessionNow: false };
     }
 
-    // Cek apakah input warga (angka) ada di pilihan sesi saat ini
-    let inputId = text;
-    if (hasPendingOptions && session.currentOptions[text]) {
-        inputId = session.currentOptions[text];
-    }
-
+    const inputId = hasPendingOptions ? session.currentOptions[text] : text;
     const response = resolveSubMenuResponse(cmsData.subMenus, inputId);
 
     if (!response) {
@@ -205,28 +114,23 @@ const processWargaInput = async (sock, msg, text, cmsData, session, sessionKey) 
     }
 
     if (response.hasNestedMenu) {
-        // Render sub-menu dalam bentuk teks
         await sendTextMenu(sock, jid, response.text, response.nestedMenu, session);
         return { endSessionNow: false };
-    } else {
-        // Kalau sudah sampai leaf, langsung beri jawaban akhir dan tutup sesi.
-        session.currentOptions = null;
-        await sock.sendMessage(jid, { text: response.text });
-        await sock.sendMessage(jid, { text: getSessionEndText(cmsData) });
-        await endSession(sock, sessionKey, jid, false, cmsData);
-        return { endSessionNow: true };
     }
+
+    session.currentOptions = null;
+    await sock.sendMessage(jid, { text: response.text });
+    await sock.sendMessage(jid, { text: getSessionEndText(cmsData) });
+    await endSession(sock, sessionKey, jid, false, cmsData);
+    return { endSessionNow: true };
 };
 
 const handleWargaMessage = async (sock, msg, bodyText = '') => {
     const jid = msg.key.remoteJid;
     if (!jid) return;
-    const rawSessionKey = await toSessionKey(jid);
-    let sessionKey = rawSessionKey;
 
     const text = (bodyText || '').trim();
     const normalizedText = text.toLowerCase();
-
     if (!text) return;
 
     if (normalizedText === '/setting') {
@@ -237,40 +141,26 @@ const handleWargaMessage = async (sock, msg, bodyText = '') => {
     }
 
     const cmsData = await loadCmsData();
-    const timeoutSeconds = Number(cmsData.timeoutSeconds) > 0
-        ? Number(cmsData.timeoutSeconds)
-        : DEFAULT_WARGA_TIMEOUT_SECONDS;
-    let existingSession = sessions.get(sessionKey);
+    const timeoutSeconds = getTimeoutSeconds(cmsData);
 
-    if (!existingSession) {
-        const local = String(jid).split('@')[0] || '';
-        const aliasedKey = sessionAliasIndex.get(jid) || sessionAliasIndex.get(local);
-        if (aliasedKey && sessions.has(aliasedKey)) {
-            sessionKey = aliasedKey;
-            existingSession = sessions.get(aliasedKey);
-        }
-    }
+    const sessionContext = await resolveSessionContext(jid);
+    let { sessionKey, session } = sessionContext;
 
-    if (!existingSession) {
-        const newSession = {
-            startedAt: Date.now(),
-            timeoutSeconds,
-            timeoutId: null,
-            currentOptions: null,
-            _aliases: new Set(),
-        };
-        sessions.set(sessionKey, newSession);
-        registerAliasesForJid(sessionKey, jid, newSession);
+    if (!session) {
+        session = createSession(sessionKey, timeoutSeconds);
+        registerAliasesForJid(sessionKey, jid, session);
 
-        await sendGreetingAndMainMenu(sock, msg, cmsData, newSession);
-        applySessionTimeout(sock, sessionKey, jid, newSession, timeoutSeconds, cmsData);
+        await sendGreetingAndMainMenu(sock, msg, cmsData, session);
+        refreshSessionTimeout(sock, sessionKey, jid, session, timeoutSeconds, cmsData);
         return;
     }
-    registerAliasesForJid(sessionKey, jid, existingSession);
 
-    const result = await processWargaInput(sock, msg, text, cmsData, existingSession, sessionKey);
+    registerAliasesForJid(sessionKey, jid, session);
+
+    const result = await processWargaInput(sock, msg, text, cmsData, session, sessionKey);
     if (result?.endSessionNow) return;
-    applySessionTimeout(sock, sessionKey, jid, existingSession, timeoutSeconds, cmsData);
+
+    refreshSessionTimeout(sock, sessionKey, jid, session, timeoutSeconds, cmsData);
 };
 
 module.exports = {

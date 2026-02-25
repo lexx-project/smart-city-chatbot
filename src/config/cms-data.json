@@ -74,5 +74,5 @@
     "izin_usaha": "Untuk izin usaha, siapkan NIB, NPWP, dan dokumen lokasi usaha. Petugas akan menghubungi Anda maksimal 1x24 jam.",
     "izin_non_usaha": "Untuk izin non-usaha, kirim jenis kegiatan, lokasi, tanggal pelaksanaan, dan kontak PIC."
   },
-  "timeoutSeconds": 30
+  "timeoutSeconds": 31
 }

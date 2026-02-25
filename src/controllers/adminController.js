@@ -1,8 +1,8 @@
-const fs = require('fs/promises');
-const path = require('path');
-const { SESSION_DIR, SUPERADMIN_JID, ADMIN_FLOW_TIMEOUT_MS } = require('../../settings');
+const { SUPERADMIN_JID, ADMIN_FLOW_TIMEOUT_MS } = require('../../settings');
+const { loadCmsData, saveCmsData, getMainMenu } = require('../services/cmsService');
+const { normalizeToJid, displayAdminNumber } = require('../services/lidService');
+const { isAdminJid, addAdminJid, listAdminJids, removeAdminJid } = require('../services/adminService');
 
-const CMS_DATA_PATH = path.join(__dirname, '../config/cms-data.json');
 const adminSessions = new Map();
 
 const ADMIN_STATE = {
@@ -13,69 +13,6 @@ const ADMIN_STATE = {
     WAITING_TIMEOUT_SECONDS: 'WAITING_TIMEOUT_SECONDS',
     WAITING_MENU_TOGGLE: 'WAITING_MENU_TOGGLE',
     WAITING_MENU_REORDER: 'WAITING_MENU_REORDER',
-};
-
-const normalizeToJid = (value = '') => {
-    const digits = String(value).replace(/\D/g, '');
-    if (!digits) return '';
-    return `${digits}@s.whatsapp.net`;
-};
-
-const jidLocal = (jid = '') => String(jid).split('@')[0] || '';
-
-const readJsonStringFile = async (filePath) => {
-    try {
-        const raw = await fs.readFile(filePath, 'utf-8');
-        return JSON.parse(raw);
-    } catch {
-        return '';
-    }
-};
-
-const resolvePhoneFromLid = async (lidLocalId) => {
-    const reversePath = path.join(SESSION_DIR, `lid-mapping-${lidLocalId}_reverse.json`);
-    const mapped = await readJsonStringFile(reversePath);
-    return String(mapped || '').replace(/\D/g, '');
-};
-
-const resolveLidFromPhone = async (phoneDigits) => {
-    const directPath = path.join(SESSION_DIR, `lid-mapping-${phoneDigits}.json`);
-    const mapped = await readJsonStringFile(directPath);
-    return String(mapped || '').replace(/\D/g, '');
-};
-
-const buildActorTokens = async (jid) => {
-    const tokens = new Set();
-    if (!jid) return tokens;
-
-    const local = jidLocal(jid);
-    if (local) tokens.add(local);
-    tokens.add(jid);
-
-    if (jid.endsWith('@lid')) {
-        const phone = await resolvePhoneFromLid(local);
-        if (phone) {
-            tokens.add(phone);
-            tokens.add(`${phone}@s.whatsapp.net`);
-        }
-    } else if (jid.endsWith('@s.whatsapp.net')) {
-        const lid = await resolveLidFromPhone(local);
-        if (lid) {
-            tokens.add(lid);
-            tokens.add(`${lid}@lid`);
-        }
-    }
-
-    return tokens;
-};
-
-const loadCmsData = async () => {
-    const raw = await fs.readFile(CMS_DATA_PATH, 'utf-8');
-    return JSON.parse(raw);
-};
-
-const saveCmsData = async (data) => {
-    await fs.writeFile(CMS_DATA_PATH, JSON.stringify(data, null, 2), 'utf-8');
 };
 
 const clearAdminFlowTimer = (jid) => {
@@ -103,86 +40,16 @@ const scheduleAdminFlowTimeout = (sock, jid) => {
     adminSessions.set(jid, current);
 };
 
-const isAdminJid = async (jid, cmsData) => {
-    if (!jid) return false;
-    const configuredAdmins = Array.isArray(cmsData?.adminJids) ? cmsData.adminJids : [];
-    const allowed = [SUPERADMIN_JID, ...configuredAdmins].filter(Boolean);
-    const actorTokens = await buildActorTokens(jid);
-
-    for (const candidate of allowed) {
-        const candidateJid = String(candidate).trim();
-        if (!candidateJid) continue;
-        const candidateLocal = jidLocal(candidateJid);
-        if (actorTokens.has(candidateJid) || actorTokens.has(candidateLocal)) return true;
-    }
-
-    return false;
+const formatMainMenuStatus = (mainMenu) => {
+    return mainMenu
+        .map((item, index) => `${index + 1}. ${item.title} (${item.enabled === false ? 'nonaktif' : 'aktif'}) [${item.id}]`)
+        .join('\n');
 };
-
-const addAdminJid = async (targetJid) => {
-    const cmsData = await loadCmsData();
-    const current = Array.isArray(cmsData.adminJids) ? cmsData.adminJids : [];
-    if (!current.includes(targetJid)) current.push(targetJid);
-
-    const phoneDigits = jidLocal(targetJid);
-    const lid = await resolveLidFromPhone(phoneDigits);
-    if (lid) {
-        const lidJid = `${lid}@lid`;
-        if (!current.includes(lidJid)) current.push(lidJid);
-    }
-
-    cmsData.adminJids = current;
-    await saveCmsData(cmsData);
-    return cmsData.adminJids;
-};
-
-const listAdminJids = async () => {
-    const cmsData = await loadCmsData();
-    const dynamicAdmins = Array.isArray(cmsData.adminJids) ? cmsData.adminJids : [];
-    return Array.from(new Set([SUPERADMIN_JID, ...dynamicAdmins]));
-};
-
-const displayAdminNumber = async (jid) => {
-    const value = String(jid || '').trim();
-    if (!value) return '';
-
-    if (value.endsWith('@lid')) {
-        const local = jidLocal(value);
-        const mapped = await resolvePhoneFromLid(local);
-        return mapped || local;
-    }
-
-    return jidLocal(value).replace(/\D/g, '');
-};
-
-const removeAdminJid = async (candidate) => {
-    const cmsData = await loadCmsData();
-    const current = Array.isArray(cmsData.adminJids) ? cmsData.adminJids : [];
-    if (!current.length) return { removed: false, remaining: current };
-
-    const raw = String(candidate || '').trim();
-    const digits = raw.replace(/\D/g, '');
-    const targets = new Set();
-
-    if (raw.includes('@')) targets.add(raw);
-    if (digits) {
-        targets.add(`${digits}@s.whatsapp.net`);
-        const lid = await resolveLidFromPhone(digits);
-        if (lid) targets.add(`${lid}@lid`);
-    }
-
-    const next = current.filter((jid) => !targets.has(jid));
-    const removed = next.length !== current.length;
-    cmsData.adminJids = next;
-    await saveCmsData(cmsData);
-    return { removed, remaining: next };
-};
-
-const getMainMenu = (cmsData) => (Array.isArray(cmsData?.mainMenu) ? cmsData.mainMenu : []);
 
 const sendSettingsMenu = async (sock, jid, cmsData) => {
     const globalTimeout = Number(cmsData?.timeoutSeconds) > 0 ? Number(cmsData.timeoutSeconds) : 30;
-    const menuEnabledCount = getMainMenu(cmsData).filter((item) => item.enabled !== false).length;
+    const mainMenu = getMainMenu(cmsData);
+    const menuEnabledCount = mainMenu.filter((item) => item.enabled !== false).length;
 
     const text = [
         'Panel Pengaturan Admin',
@@ -190,7 +57,7 @@ const sendSettingsMenu = async (sock, jid, cmsData) => {
         `1. Ubah Pesan Penutup (${cmsData?.sessionEndText ? 'aktif' : 'default'})`,
         `2. Ubah Pesan Timeout (${cmsData?.timeoutText ? 'aktif' : 'default'})`,
         `3. Ubah Timeout (${globalTimeout} detik)`,
-        `4. Aktif/Nonaktifkan Menu (${menuEnabledCount}/${getMainMenu(cmsData).length} aktif)`,
+        `4. Aktif/Nonaktifkan Menu (${menuEnabledCount}/${mainMenu.length} aktif)`,
         '5. Ubah Urutan Menu',
         '',
         'Balas angka 1-5. Ketik /batal untuk keluar.',
@@ -199,12 +66,6 @@ const sendSettingsMenu = async (sock, jid, cmsData) => {
     await sock.sendMessage(jid, { text });
     adminSessions.set(jid, { state: ADMIN_STATE.SETTINGS_MENU, timeoutId: null });
     scheduleAdminFlowTimeout(sock, jid);
-};
-
-const formatMainMenuStatus = (mainMenu) => {
-    return mainMenu
-        .map((item, index) => `${index + 1}. ${item.title} (${item.enabled === false ? 'nonaktif' : 'aktif'}) [${item.id}]`)
-        .join('\n');
 };
 
 const handleSettingsState = async (sock, jid, text, session, cmsData) => {
