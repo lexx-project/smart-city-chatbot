@@ -1,6 +1,9 @@
 {
-  "adminJids": [],
-  "greetingMessage": "tes",
+  "adminJids": [
+    "6285187052931@s.whatsapp.net",
+    "201958556201025@lid"
+  ],
+  "greetingMessage": "Halo Warga. Selamat datang di Smart Public Service. Kami siap membantu kebutuhan layanan publik Anda.",
   "mainMenu": [
     {
       "id": "menu_kependudukan",

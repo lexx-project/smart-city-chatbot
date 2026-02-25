@@ -76,6 +76,10 @@ const shouldSkipMessage = (msg) => {
 
 const registerRoutes = (sock) => {
     sock.ev.on('messages.upsert', async ({ type, messages }) => {
+        // --- PERTAHANAN 1: Tolak pesan hasil sinkronisasi (sync/append) ---
+        // Cuma proses pesan yang bener-bener baru masuk secara real-time
+        if (type !== 'notify') return;
+
         if (!Array.isArray(messages) || messages.length === 0) return;
 
         for (const msg of messages) {
@@ -84,11 +88,24 @@ const registerRoutes = (sock) => {
 
                 const jid = msg.key.remoteJid;
                 if (!jid) continue;
+
+                // --- PERTAHANAN 2: Filter Pesan Basi (Mencegah Spam) ---
+                const messageTime = msg.messageTimestamp; // Waktu pesan dari server WA (detik)
+                const currentTime = Math.floor(Date.now() / 1000); // Waktu server lu sekarang (detik)
+                
+                // Kalau umur pesan lebih dari 60 detik (1 menit), berarti itu pesan pas bot mati. Bantai!
+                if (currentTime - messageTime > 60) {
+                    console.log(`[ANTI-SPAM] Membuang pesan basi dari: ${jid}`);
+                    continue; 
+                }
+
                 const bodyText = extractBodyText(msg);
                 if (!bodyText) continue;
                 msg.bodyText = bodyText;
 
                 logIncomingChat(msg, 'WARGA');
+                
+                // Lempar ke Admin Controller dulu, kalau bukan command admin, lanjut ke Warga
                 const handledByAdmin = await handleAdminMessage(sock, msg, bodyText);
                 if (handledByAdmin) continue;
 

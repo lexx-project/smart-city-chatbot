@@ -1,4 +1,3 @@
-const path = require('path');
 const P = require('pino'); // <--- INI YANG HILANG (Si P)
 const qrcode = require('qrcode-terminal');
 const {
@@ -8,8 +7,8 @@ const {
     fetchLatestBaileysVersion,
 } = require('@whiskeysockets/baileys');
 const { registerRoutes } = require('./src/routes');
+const { AUTH_DIR } = require('./settings');
 
-const AUTH_DIR = path.join(__dirname, 'session');
 let currentSock = null;
 let isStarting = false;
 let reconnectTimer = null;

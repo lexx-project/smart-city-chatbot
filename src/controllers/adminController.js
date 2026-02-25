@@ -1,11 +1,9 @@
 const fs = require('fs/promises');
 const path = require('path');
+const { SESSION_DIR, SUPERADMIN_JID, ADMIN_FLOW_TIMEOUT_MS } = require('../../settings');
 
 const CMS_DATA_PATH = path.join(__dirname, '../config/cms-data.json');
-const SESSION_DIR = path.join(__dirname, '../../session');
-const SUPERADMIN_JID = process.env.SUPERADMIN_JID || '62882009391607@s.whatsapp.net';
 const adminSessions = new Map();
-const ADMIN_FLOW_TIMEOUT_MS = 60 * 1000;
 
 const ADMIN_STATE = {
     IDLE: 'IDLE',
