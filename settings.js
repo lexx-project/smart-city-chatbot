@@ -5,14 +5,6 @@ const toNumber = (value, fallback) => {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
-const toList = (value, fallback = []) => {
-    if (!value) return fallback;
-    return String(value)
-        .split(',')
-        .map((item) => item.trim())
-        .filter(Boolean);
-};
-
 const SESSION_PATH = path.join(__dirname, 'session');
 
 module.exports = {
@@ -26,6 +18,4 @@ module.exports = {
 
     // Warga flow timeout behavior
     DEFAULT_WARGA_TIMEOUT_SECONDS: toNumber(process.env.DEFAULT_WARGA_TIMEOUT_SECONDS, 30),
-    LONG_INPUT_TIMEOUT_SECONDS: toNumber(process.env.LONG_INPUT_TIMEOUT_SECONDS, 180),
-    LONG_INPUT_MENU_IDS: toList(process.env.LONG_INPUT_MENU_IDS, ['menu_pengaduan']),
 };

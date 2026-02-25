@@ -4,24 +4,29 @@
     "201958556201025@lid"
   ],
   "greetingMessage": "Halo Warga. Selamat datang di Smart Public Service. Kami siap membantu kebutuhan layanan publik Anda.",
+  "timeoutText": "Terima kasih telah menghubungi kami. Sesi Anda telah berakhir karena tidak ada aktivitas. Silakan kirim pesan lagi untuk memulai sesi baru.",
+  "sessionEndText": "Terima kasih sudah menggunakan layanan Smart Public Service. Sampai jumpa.",
   "mainMenu": [
     {
       "id": "menu_kependudukan",
       "header": "Dukcapil",
       "title": "Layanan Kependudukan",
-      "description": "KTP, KK, akta kelahiran, dan pindah domisili"
+      "description": "KTP, KK, akta kelahiran, dan pindah domisili",
+      "enabled": true
     },
     {
       "id": "menu_perizinan",
       "header": "Perizinan",
       "title": "Layanan Perizinan",
-      "description": "Informasi dan pengajuan izin usaha/non-usaha"
+      "description": "Informasi dan pengajuan izin usaha/non-usaha",
+      "enabled": true
     },
     {
       "id": "menu_pengaduan",
       "header": "Pengaduan",
       "title": "Pengaduan Masyarakat",
-      "description": "Sampaikan laporan kendala layanan publik"
+      "description": "Sampaikan laporan kendala layanan publik",
+      "enabled": true
     }
   ],
   "subMenus": {
