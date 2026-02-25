@@ -6,6 +6,10 @@
   "greetingMessage": "Halo Warga. Selamat datang di Smart Public Service. Kami siap membantu kebutuhan layanan publik Anda.",
   "timeoutText": "Terima kasih telah menghubungi kami. Sesi Anda telah berakhir karena tidak ada aktivitas. Silakan kirim pesan lagi untuk memulai sesi baru.",
   "sessionEndText": "Terima kasih sudah menggunakan layanan Smart Public Service. Sampai jumpa.",
+  "longInputTimeoutSeconds": 180,
+  "longInputMenuIds": [
+    "menu_pengaduan"
+  ],
   "mainMenu": [
     {
       "id": "menu_kependudukan",

@@ -4,6 +4,8 @@ const {
     getTimeoutSeconds,
     getTimeoutText,
     getSessionEndText,
+    getLongInputTimeoutSeconds,
+    getLongInputMenuIds,
 } = require('../services/cmsService');
 const {
     sessions,
@@ -13,6 +15,8 @@ const {
     deleteSession,
     scheduleSessionTimeout,
 } = require('../services/wargaSessionService');
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const sendTextMenu = async (sock, jid, textBlock, menuArray, session) => {
     let message = `${textBlock}\n\n`;
@@ -94,6 +98,14 @@ const processWargaInput = async (sock, msg, text, cmsData, session, sessionKey) 
     const jid = msg?.key?.remoteJid;
     if (!jid) return { endSessionNow: false };
 
+    if (session.awaitingTextFor) {
+        await sock.sendMessage(jid, { text: 'Berhasil. Data Anda sudah kami terima.' });
+        await wait(2000);
+        await sock.sendMessage(jid, { text: getSessionEndText(cmsData) });
+        await endSession(sock, sessionKey, jid, false, cmsData);
+        return { endSessionNow: true };
+    }
+
     const hasPendingOptions = !!session.currentOptions;
 
     if (hasPendingOptions && !session.currentOptions[text]) {
@@ -120,6 +132,14 @@ const processWargaInput = async (sock, msg, text, cmsData, session, sessionKey) 
 
     session.currentOptions = null;
     await sock.sendMessage(jid, { text: response.text });
+    const longInputMenuIds = new Set(getLongInputMenuIds(cmsData));
+    if (longInputMenuIds.has(inputId)) {
+        session.awaitingTextFor = inputId;
+        session.timeoutSeconds = getLongInputTimeoutSeconds(cmsData);
+        return { endSessionNow: false };
+    }
+
+    await wait(2000);
     await sock.sendMessage(jid, { text: getSessionEndText(cmsData) });
     await endSession(sock, sessionKey, jid, false, cmsData);
     return { endSessionNow: true };
@@ -148,6 +168,7 @@ const handleWargaMessage = async (sock, msg, bodyText = '') => {
 
     if (!session) {
         session = createSession(sessionKey, timeoutSeconds);
+        session.awaitingTextFor = null;
         registerAliasesForJid(sessionKey, jid, session);
 
         await sendGreetingAndMainMenu(sock, msg, cmsData, session);
