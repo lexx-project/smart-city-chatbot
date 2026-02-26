@@ -1,15 +1,8 @@
 {
-  "adminJids": [
-    "6285187052931@s.whatsapp.net",
-    "201958556201025@lid"
-  ],
+  "adminJids": [],
   "greetingMessage": "Halo Warga. Selamat datang di Smart Public Service. Kami siap membantu kebutuhan layanan publik Anda.",
   "timeoutText": "Terima kasih telah menghubungi kami. Sesi Anda telah berakhir karena tidak ada aktivitas. Silakan kirim pesan lagi untuk memulai sesi baru.",
   "sessionEndText": "Terima kasih sudah menggunakan layanan Smart Public Service. Sampai jumpa.",
-  "longInputTimeoutSeconds": 180,
-  "longInputMenuIds": [
-    "menu_pengaduan"
-  ],
   "mainMenu": [
     {
       "id": "menu_kependudukan",
@@ -72,11 +65,16 @@
         }
       ]
     },
-    "menu_pengaduan": "Silakan kirim pengaduan dengan format: NIK#Nama#Alamat#Isi Pengaduan. Tim kami akan menindaklanjuti.",
+    "menu_pengaduan": {
+      "text": "Silakan kirim pengaduan dengan format: NIK#Nama#Alamat#Isi Pengaduan. Tim kami akan menindaklanjuti.",
+      "flowMode": "await_reply",
+      "awaitTimeoutSeconds": 180,
+      "successReply": "TERIMA KASIH, PERMINTAAN ANDA SUDAH KAMI PROSES"
+    },
     "dukcapil_ktp": "Syarat KTP: KK terbaru, surat pengantar RT/RW, dan foto 3x4. Kunjungi loket Dukcapil Senin-Jumat pukul 08.00-15.00.",
     "dukcapil_kk": "Syarat KK: formulir F-1.01, buku nikah/akta, dan dokumen pendukung perubahan data.",
     "izin_usaha": "Untuk izin usaha, siapkan NIB, NPWP, dan dokumen lokasi usaha. Petugas akan menghubungi Anda maksimal 1x24 jam.",
     "izin_non_usaha": "Untuk izin non-usaha, kirim jenis kegiatan, lokasi, tanggal pelaksanaan, dan kontak PIC."
   },
-  "timeoutSeconds": 31
+  "timeoutSeconds": 10
 }

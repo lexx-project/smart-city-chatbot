@@ -21,13 +21,13 @@ const registerRoutes = (sock) => {
                 }
 
                 const bodyText = extractBodyText(msg);
-                if (!bodyText) continue;
-
                 msg.bodyText = bodyText;
-                logIncomingChat(msg, 'WARGA');
 
                 const handledByAdmin = await handleAdminMessage(sock, msg, bodyText);
                 if (handledByAdmin) continue;
+
+                if (!bodyText) continue;
+                logIncomingChat(msg, 'WARGA');
 
                 await handleWargaMessage(sock, msg, bodyText);
             } catch (error) {

@@ -1,7 +1,7 @@
 {
   "watch": ["app.js", "src"],
-  "ext": "js,json",
-  "ignore": ["node_modules", "session", "*.log"],
+  "ext": "js",
+  "ignore": ["node_modules", "session", "*.log", "src/config/*.json"],
   "exec": "node app.js",
   "delay": "300",
   "events": {

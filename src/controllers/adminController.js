@@ -1,7 +1,20 @@
 const { SUPERADMIN_JID, ADMIN_FLOW_TIMEOUT_MS } = require('../../settings');
-const { loadCmsData, saveCmsData, getMainMenu } = require('../services/cmsService');
+const {
+    loadCmsData,
+    saveCmsData,
+    getMainMenu,
+    getSubMenuSettingTargets,
+    setSubMenuFlowMode,
+    setSubMenuAwaitTimeout,
+    setSubMenuSuccessReply,
+    resolveMenuNode,
+    FLOW_MODE,
+} = require('../services/cmsService');
 const { normalizeToJid, displayAdminNumber } = require('../services/lidService');
 const { isAdminJid, addAdminJid, listAdminJids, removeAdminJid } = require('../services/adminService');
+const { countWargaChatsInLastDays, countWargaSessionsInLastDays } = require('../services/analyticsService');
+const { updateBotProfilePictureFromMessage, removeBotProfilePicture } = require('../services/botProfileService');
+const { unwrapMessage } = require('../middlewares/messageMiddleware');
 
 const adminSessions = new Map();
 
@@ -13,6 +26,33 @@ const ADMIN_STATE = {
     WAITING_TIMEOUT_SECONDS: 'WAITING_TIMEOUT_SECONDS',
     WAITING_MENU_TOGGLE: 'WAITING_MENU_TOGGLE',
     WAITING_MENU_REORDER: 'WAITING_MENU_REORDER',
+    WAITING_FLOW_MAIN_MENU: 'WAITING_FLOW_MAIN_MENU',
+    WAITING_FLOW_SUB_MENU: 'WAITING_FLOW_SUB_MENU',
+    WAITING_FLOW_MODE_VALUE: 'WAITING_FLOW_MODE_VALUE',
+    WAITING_FLOW_TARGET_TIMEOUT: 'WAITING_FLOW_TARGET_TIMEOUT',
+    WAITING_FLOW_TIMEOUT_VALUE: 'WAITING_FLOW_TIMEOUT_VALUE',
+    WAITING_FLOW_SUCCESS_VALUE: 'WAITING_FLOW_SUCCESS_VALUE',
+    WAITING_STATS_RANGE: 'WAITING_STATS_RANGE',
+    WAITING_BOT_PP_IMAGE: 'WAITING_BOT_PP_IMAGE',
+};
+
+const getAdminSession = (jid) => adminSessions.get(jid) || { state: ADMIN_STATE.IDLE, timeoutId: null };
+
+const setAdminSession = (jid, patch = {}) => {
+    const current = getAdminSession(jid);
+    adminSessions.set(jid, { ...current, ...patch });
+};
+
+const resetAdminSession = (jid) => {
+    adminSessions.set(jid, {
+        state: ADMIN_STATE.IDLE,
+        timeoutId: null,
+        targetSubMenuId: null,
+        targetList: null,
+        flowChoices: null,
+        flowAction: null,
+        statsType: null,
+    });
 };
 
 const clearAdminFlowTimer = (jid) => {
@@ -26,18 +66,14 @@ const scheduleAdminFlowTimeout = (sock, jid) => {
 
     const timeoutId = setTimeout(async () => {
         try {
-            adminSessions.set(jid, { state: ADMIN_STATE.IDLE, timeoutId: null });
-            await sock.sendMessage(jid, {
-                text: 'Timeout 60 detik. Proses /setting dibatalkan otomatis.',
-            });
+            resetAdminSession(jid);
+            await sock.sendMessage(jid, { text: 'Timeout 60 detik. Proses /setting dibatalkan otomatis.' });
         } catch (error) {
             console.error('[ADMIN_TIMEOUT_ERROR]', error);
         }
     }, ADMIN_FLOW_TIMEOUT_MS);
 
-    const current = adminSessions.get(jid) || { state: ADMIN_STATE.IDLE };
-    current.timeoutId = timeoutId;
-    adminSessions.set(jid, current);
+    setAdminSession(jid, { timeoutId });
 };
 
 const formatMainMenuStatus = (mainMenu) => {
@@ -46,25 +82,117 @@ const formatMainMenuStatus = (mainMenu) => {
         .join('\n');
 };
 
+const formatSubMenuTargets = (targets) => {
+    return targets
+        .map((item, index) => {
+            const modeLabel = item.flowMode === FLOW_MODE.AWAIT_REPLY ? 'Butuh balasan warga' : 'Langsung selesai';
+            return `${index + 1}. ${item.title} [${item.id}] (${modeLabel}, timeout=${item.awaitTimeoutSeconds} detik)`;
+        })
+        .join('\n');
+};
+
+const formatSimpleChoices = (choices = []) => {
+    return choices.map((item, index) => `${index + 1}. ${item.title}`).join('\n');
+};
+
+const parseSubMenuTarget = (text, targetList = []) => {
+    const raw = String(text || '').trim();
+    if (!raw) return null;
+
+    if (/^\d+$/.test(raw)) {
+        const index = Number(raw) - 1;
+        return targetList[index] || null;
+    }
+
+    return targetList.find((item) => item.id === raw) || null;
+};
+
+const parseChoice = (text, choices = []) => {
+    const raw = String(text || '').trim();
+    if (!raw) return null;
+    if (/^\d+$/.test(raw)) {
+        const index = Number(raw) - 1;
+        return choices[index] || null;
+    }
+    return choices.find((item) => item.id === raw) || null;
+};
+
+const parseFlowModeInput = (text) => {
+    const raw = String(text || '').trim().toLowerCase();
+    if (raw === '1') return FLOW_MODE.CLOSE;
+    if (raw === '2') return FLOW_MODE.AWAIT_REPLY;
+    if (['close', 'selesai', 'langsung'].includes(raw)) return FLOW_MODE.CLOSE;
+    if (['await_reply', 'await', 'reply', 'balas'].includes(raw)) return FLOW_MODE.AWAIT_REPLY;
+    if (['langsung selesai'].includes(raw)) return FLOW_MODE.CLOSE;
+    if (['butuh balasan', 'menunggu balasan', 'tunggu balasan warga'].includes(raw)) return FLOW_MODE.AWAIT_REPLY;
+    return null;
+};
+
+const RANGE_OPTIONS = {
+    '1': 1,
+    '2': 7,
+    '3': 30,
+    '4': 365,
+};
+
+const formatRangeLabel = (days) => {
+    if (days === 1) return '1 hari';
+    if (days === 7) return '7 hari';
+    if (days === 30) return '30 hari';
+    return '1 tahun';
+};
+
+const sendStatsRangeMenu = async (sock, jid, title) => {
+    await sock.sendMessage(jid, {
+        text: [
+            title,
+            '',
+            '1. 1 hari',
+            '2. 7 hari',
+            '3. 30 hari',
+            '4. 1 tahun',
+            '',
+            'Balas 1-4.',
+        ].join('\n'),
+    });
+};
+
+const hasAwaitReplyLeaf = (cmsData, id, visited = new Set()) => {
+    const key = String(id || '');
+    if (!key || visited.has(key)) return false;
+    visited.add(key);
+
+    const node = resolveMenuNode(cmsData, key);
+    if (!node) return false;
+    if (node.kind === 'leaf') return node.flowMode === FLOW_MODE.AWAIT_REPLY;
+
+    return (node.nextMenu || []).some((item) => hasAwaitReplyLeaf(cmsData, item.id, new Set(visited)));
+};
+
 const sendSettingsMenu = async (sock, jid, cmsData) => {
     const globalTimeout = Number(cmsData?.timeoutSeconds) > 0 ? Number(cmsData.timeoutSeconds) : 30;
     const mainMenu = getMainMenu(cmsData);
     const menuEnabledCount = mainMenu.filter((item) => item.enabled !== false).length;
+    const subMenuTargets = getSubMenuSettingTargets(cmsData);
 
     const text = [
         'Panel Pengaturan Admin',
         '',
         `1. Ubah Pesan Penutup (${cmsData?.sessionEndText ? 'aktif' : 'default'})`,
         `2. Ubah Pesan Timeout (${cmsData?.timeoutText ? 'aktif' : 'default'})`,
-        `3. Ubah Timeout (${globalTimeout} detik)`,
+        `3. Ubah Timeout Global (${globalTimeout} detik)`,
         `4. Aktif/Nonaktifkan Menu (${menuEnabledCount}/${mainMenu.length} aktif)`,
         '5. Ubah Urutan Menu',
+        `6. Atur Jenis Respon SubMenu (${subMenuTargets.length})`,
+        '7. Atur Durasi Tunggu Balasan SubMenu',
+        '8. Atur Pesan Saat Balasan Diterima',
+        '9. Ubah Foto Profil Bot',
         '',
-        'Balas angka 1-5. Ketik /batal untuk keluar.',
+        'Balas angka 1-9. Ketik /batal untuk keluar.',
     ].join('\n');
 
     await sock.sendMessage(jid, { text });
-    adminSessions.set(jid, { state: ADMIN_STATE.SETTINGS_MENU, timeoutId: null });
+    setAdminSession(jid, { state: ADMIN_STATE.SETTINGS_MENU, targetSubMenuId: null, targetList: null, flowAction: null });
     scheduleAdminFlowTimeout(sock, jid);
 };
 
@@ -73,7 +201,7 @@ const handleSettingsState = async (sock, jid, text, session, cmsData) => {
         cmsData.sessionEndText = text;
         await saveCmsData(cmsData);
         clearAdminFlowTimer(jid);
-        adminSessions.set(jid, { state: ADMIN_STATE.IDLE, timeoutId: null });
+        resetAdminSession(jid);
         await sock.sendMessage(jid, { text: 'Berhasil memperbarui pesan penutup.' });
         return true;
     }
@@ -82,7 +210,7 @@ const handleSettingsState = async (sock, jid, text, session, cmsData) => {
         cmsData.timeoutText = text;
         await saveCmsData(cmsData);
         clearAdminFlowTimer(jid);
-        adminSessions.set(jid, { state: ADMIN_STATE.IDLE, timeoutId: null });
+        resetAdminSession(jid);
         await sock.sendMessage(jid, { text: 'Berhasil memperbarui pesan timeout.' });
         return true;
     }
@@ -98,7 +226,7 @@ const handleSettingsState = async (sock, jid, text, session, cmsData) => {
         cmsData.timeoutSeconds = seconds;
         await saveCmsData(cmsData);
         clearAdminFlowTimer(jid);
-        adminSessions.set(jid, { state: ADMIN_STATE.IDLE, timeoutId: null });
+        resetAdminSession(jid);
         await sock.sendMessage(jid, { text: `Berhasil. Timeout sesi warga diubah ke ${seconds} detik.` });
         return true;
     }
@@ -134,10 +262,8 @@ const handleSettingsState = async (sock, jid, text, session, cmsData) => {
         cmsData.mainMenu = mainMenu;
         await saveCmsData(cmsData);
         clearAdminFlowTimer(jid);
-        adminSessions.set(jid, { state: ADMIN_STATE.IDLE, timeoutId: null });
-        await sock.sendMessage(jid, {
-            text: `Berhasil. Menu "${target.title}" sekarang ${enabled ? 'aktif' : 'nonaktif'}.`,
-        });
+        resetAdminSession(jid);
+        await sock.sendMessage(jid, { text: `Berhasil. Menu "${target.title}" sekarang ${enabled ? 'aktif' : 'nonaktif'}.` });
         return true;
     }
 
@@ -159,12 +285,241 @@ const handleSettingsState = async (sock, jid, text, session, cmsData) => {
             return true;
         }
 
-        const reordered = nums.map((num) => mainMenu[num - 1]);
-        cmsData.mainMenu = reordered;
+        cmsData.mainMenu = nums.map((num) => mainMenu[num - 1]);
         await saveCmsData(cmsData);
         clearAdminFlowTimer(jid);
-        adminSessions.set(jid, { state: ADMIN_STATE.IDLE, timeoutId: null });
+        resetAdminSession(jid);
         await sock.sendMessage(jid, { text: 'Berhasil. Urutan menu utama telah diperbarui.' });
+        return true;
+    }
+
+    if (session.state === ADMIN_STATE.WAITING_FLOW_MAIN_MENU) {
+        const target = parseChoice(text, session.flowChoices || []);
+        if (!target) {
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, { text: 'Pilihan tidak valid. Balas nomor/id.' });
+            return true;
+        }
+
+        const node = resolveMenuNode(cmsData, target.id);
+        if (!node) {
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, { text: 'Menu tidak ditemukan.' });
+            return true;
+        }
+
+        if (node.kind === 'menu') {
+            let nextChoices = node.nextMenu;
+            if (session.flowAction === 'success') {
+                nextChoices = (node.nextMenu || []).filter((item) => hasAwaitReplyLeaf(cmsData, item.id));
+                if (!nextChoices.length) {
+                    scheduleAdminFlowTimeout(sock, jid);
+                    await sock.sendMessage(jid, { text: 'Tidak ada submenu mode butuh balasan di menu ini.' });
+                    return true;
+                }
+            }
+
+            setAdminSession(jid, {
+                state: ADMIN_STATE.WAITING_FLOW_SUB_MENU,
+                flowChoices: nextChoices,
+                targetSubMenuId: null,
+            });
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, {
+                text: ['Pilih submenu:', formatSimpleChoices(nextChoices)].join('\n\n'),
+            });
+            return true;
+        }
+
+        if (session.flowAction === 'success') {
+            if (node.flowMode !== FLOW_MODE.AWAIT_REPLY) {
+                scheduleAdminFlowTimeout(sock, jid);
+                await sock.sendMessage(jid, { text: 'Submenu ini bukan mode butuh balasan.' });
+                return true;
+            }
+            setAdminSession(jid, { state: ADMIN_STATE.WAITING_FLOW_SUCCESS_VALUE, targetSubMenuId: target.id, flowChoices: null });
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, { text: `Kirim pesan sukses baru.\nTarget: ${target.title}` });
+            return true;
+        }
+
+        setAdminSession(jid, { state: ADMIN_STATE.WAITING_FLOW_MODE_VALUE, targetSubMenuId: target.id, flowChoices: null });
+        scheduleAdminFlowTimeout(sock, jid);
+        await sock.sendMessage(jid, {
+            text: [
+                '1. Langsung selesai',
+                '2. Butuh balasan warga',
+                `Target: ${target.title}`,
+                'Balas 1/2',
+            ].join('\n'),
+        });
+        return true;
+    }
+
+    if (session.state === ADMIN_STATE.WAITING_FLOW_SUB_MENU) {
+        const target = parseChoice(text, session.flowChoices || []);
+        if (!target) {
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, { text: 'Pilihan tidak valid. Balas nomor/id.' });
+            return true;
+        }
+
+        const node = resolveMenuNode(cmsData, target.id);
+        if (!node) {
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, { text: 'Submenu tidak ditemukan.' });
+            return true;
+        }
+
+        if (node.kind === 'menu') {
+            let nextChoices = node.nextMenu;
+            if (session.flowAction === 'success') {
+                nextChoices = (node.nextMenu || []).filter((item) => hasAwaitReplyLeaf(cmsData, item.id));
+                if (!nextChoices.length) {
+                    scheduleAdminFlowTimeout(sock, jid);
+                    await sock.sendMessage(jid, { text: 'Tidak ada submenu mode butuh balasan di level ini.' });
+                    return true;
+                }
+            }
+
+            setAdminSession(jid, {
+                state: ADMIN_STATE.WAITING_FLOW_SUB_MENU,
+                flowChoices: nextChoices,
+                targetSubMenuId: null,
+            });
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, {
+                text: ['Pilih submenu:', formatSimpleChoices(nextChoices)].join('\n\n'),
+            });
+            return true;
+        }
+
+        if (session.flowAction === 'success') {
+            if (node.flowMode !== FLOW_MODE.AWAIT_REPLY) {
+                scheduleAdminFlowTimeout(sock, jid);
+                await sock.sendMessage(jid, { text: 'Submenu ini bukan mode butuh balasan.' });
+                return true;
+            }
+            setAdminSession(jid, { state: ADMIN_STATE.WAITING_FLOW_SUCCESS_VALUE, targetSubMenuId: target.id, flowChoices: null });
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, { text: `Kirim pesan sukses baru.\nTarget: ${target.title}` });
+            return true;
+        }
+
+        setAdminSession(jid, { state: ADMIN_STATE.WAITING_FLOW_MODE_VALUE, targetSubMenuId: target.id, flowChoices: null });
+        scheduleAdminFlowTimeout(sock, jid);
+        await sock.sendMessage(jid, {
+            text: [
+                '1. Langsung selesai',
+                '2. Butuh balasan warga',
+                `Target: ${target.title}`,
+                'Balas 1/2',
+            ].join('\n'),
+        });
+        return true;
+    }
+
+    if (session.state === ADMIN_STATE.WAITING_FLOW_MODE_VALUE) {
+        const mode = parseFlowModeInput(text);
+        if (!mode || !session.targetSubMenuId) {
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, {
+                text: 'Pilihan tidak valid. Balas 1 atau 2.',
+            });
+            return true;
+        }
+
+        const updated = setSubMenuFlowMode(cmsData, session.targetSubMenuId, mode);
+        if (!updated) {
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, { text: 'Submenu target tidak bisa diubah.' });
+            return true;
+        }
+
+        await saveCmsData(cmsData);
+        clearAdminFlowTimer(jid);
+        resetAdminSession(jid);
+        const modeLabel = mode === FLOW_MODE.AWAIT_REPLY ? 'Butuh balasan warga' : 'Langsung selesai';
+        await sock.sendMessage(jid, { text: `Berhasil. Cara selesai ${session.targetSubMenuId} diubah ke: ${modeLabel}.` });
+        return true;
+    }
+
+    if (session.state === ADMIN_STATE.WAITING_FLOW_TARGET_TIMEOUT) {
+        const target = parseSubMenuTarget(text, session.targetList || []);
+        if (!target) {
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, { text: 'Submenu tidak valid. Balas nomor/id yang ada di daftar.' });
+            return true;
+        }
+
+        setAdminSession(jid, { state: ADMIN_STATE.WAITING_FLOW_TIMEOUT_VALUE, targetSubMenuId: target.id });
+        scheduleAdminFlowTimeout(sock, jid);
+        await sock.sendMessage(jid, { text: `Masukkan timeout baru untuk ${target.id} (detik, 30-3600).` });
+        return true;
+    }
+
+    if (session.state === ADMIN_STATE.WAITING_FLOW_TIMEOUT_VALUE) {
+        const seconds = Number(text);
+        if (!session.targetSubMenuId || !Number.isInteger(seconds) || seconds < 30 || seconds > 3600) {
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, { text: 'Timeout tidak valid. Masukkan angka 30-3600.' });
+            return true;
+        }
+
+        const updated = setSubMenuAwaitTimeout(cmsData, session.targetSubMenuId, seconds);
+        if (!updated) {
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, { text: 'Submenu target tidak bisa diubah.' });
+            return true;
+        }
+
+        await saveCmsData(cmsData);
+        clearAdminFlowTimer(jid);
+        resetAdminSession(jid);
+        await sock.sendMessage(jid, { text: `Berhasil. Timeout ${session.targetSubMenuId} diubah ke ${seconds} detik.` });
+        return true;
+    }
+
+    if (session.state === ADMIN_STATE.WAITING_FLOW_SUCCESS_VALUE) {
+        if (!session.targetSubMenuId) {
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, { text: 'Target submenu tidak valid.' });
+            return true;
+        }
+
+        const updated = setSubMenuSuccessReply(cmsData, session.targetSubMenuId, text);
+        if (!updated) {
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, { text: 'Submenu target tidak bisa diubah.' });
+            return true;
+        }
+
+        await saveCmsData(cmsData);
+        clearAdminFlowTimer(jid);
+        resetAdminSession(jid);
+        await sock.sendMessage(jid, { text: `Berhasil. Pesan sukses ${session.targetSubMenuId} diperbarui.` });
+        return true;
+    }
+
+    if (session.state === ADMIN_STATE.WAITING_STATS_RANGE) {
+        const days = RANGE_OPTIONS[String(text).trim()];
+        if (!days || !session.statsType) {
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, { text: 'Pilihan tidak valid. Balas 1-4.' });
+            return true;
+        }
+
+        let total = 0;
+        if (session.statsType === 'chat') {
+            total = await countWargaChatsInLastDays(days);
+            await sock.sendMessage(jid, { text: `Total chat warga (${formatRangeLabel(days)}): ${total}` });
+        } else {
+            total = await countWargaSessionsInLastDays(days);
+            await sock.sendMessage(jid, { text: `Total sesi warga (${formatRangeLabel(days)}): ${total}` });
+        }
+
+        clearAdminFlowTimer(jid);
+        resetAdminSession(jid);
         return true;
     }
 
@@ -176,11 +531,10 @@ const handleAdminMessage = async (sock, msg, bodyText = '') => {
     if (!jid) return false;
 
     const text = (bodyText || '').trim();
-    if (!text) return false;
     const normalized = text.toLowerCase();
     const cmsData = await loadCmsData();
     const isAdmin = await isAdminJid(jid, cmsData);
-    const session = adminSessions.get(jid) || { state: ADMIN_STATE.IDLE };
+    const session = getAdminSession(jid);
 
     if (normalized === '/batal') {
         if (!isAdmin) {
@@ -188,10 +542,55 @@ const handleAdminMessage = async (sock, msg, bodyText = '') => {
             return true;
         }
         clearAdminFlowTimer(jid);
-        adminSessions.set(jid, { state: ADMIN_STATE.IDLE, timeoutId: null });
+        resetAdminSession(jid);
         await sock.sendMessage(jid, { text: 'Proses admin dibatalkan.' });
         return true;
     }
+
+    if (session.state === ADMIN_STATE.WAITING_BOT_PP_IMAGE) {
+        if (!isAdmin) {
+            await sock.sendMessage(jid, { text: 'Akses ditolak. Hanya admin yang bisa mengubah foto profil bot.' });
+            return true;
+        }
+
+        if (normalized === 'hapus') {
+            try {
+                await removeBotProfilePicture(sock);
+                clearAdminFlowTimer(jid);
+                resetAdminSession(jid);
+                await sock.sendMessage(jid, { text: 'Berhasil. Foto profil bot dihapus.' });
+            } catch (error) {
+                console.error('[BOT_PP_REMOVE_ERROR]', error);
+                clearAdminFlowTimer(jid);
+                resetAdminSession(jid);
+                await sock.sendMessage(jid, { text: 'Gagal hapus foto profil.' });
+            }
+            return true;
+        }
+
+        const rawMessage = unwrapMessage(msg?.message || {});
+        const hasImage = !!rawMessage?.imageMessage;
+        if (!hasImage) {
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, { text: 'Kirim foto baru, atau ketik hapus.' });
+            return true;
+        }
+
+        try {
+            await updateBotProfilePictureFromMessage(sock, msg);
+            clearAdminFlowTimer(jid);
+            resetAdminSession(jid);
+            await sock.sendMessage(jid, { text: 'Berhasil. Foto profil bot diperbarui.' });
+        } catch (error) {
+            console.error('[BOT_PP_UPDATE_ERROR]', error);
+            clearAdminFlowTimer(jid);
+            resetAdminSession(jid);
+            await sock.sendMessage(jid, { text: 'Gagal update foto profil.' });
+        }
+        return true;
+    }
+
+    if (!text) return false;
 
     if (normalized === '/setting') {
         if (!isAdmin) {
@@ -216,9 +615,7 @@ const handleAdminMessage = async (sock, msg, bodyText = '') => {
         }
 
         const admins = await addAdminJid(targetJid);
-        await sock.sendMessage(jid, {
-            text: `Berhasil menambahkan admin: ${targetJid}\nTotal admin dinamis: ${admins.length}`,
-        });
+        await sock.sendMessage(jid, { text: `Berhasil menambahkan admin: ${targetJid}\nTotal admin dinamis: ${admins.length}` });
         return true;
     }
 
@@ -281,9 +678,33 @@ const handleAdminMessage = async (sock, msg, bodyText = '') => {
                 '3. /addadmin',
                 '4. /listadmin',
                 '5. /deladmin',
-                '6. /batal',
+                '6. /totalchat',
+                '7. /totalsesi',
+                '8. /batal',
             ].join('\n'),
         });
+        return true;
+    }
+
+    if (normalized === '/totalchat') {
+        if (!isAdmin) {
+            await sock.sendMessage(jid, { text: 'Akses ditolak. Hanya admin yang bisa menggunakan /totalchat.' });
+            return true;
+        }
+        setAdminSession(jid, { state: ADMIN_STATE.WAITING_STATS_RANGE, statsType: 'chat' });
+        scheduleAdminFlowTimeout(sock, jid);
+        await sendStatsRangeMenu(sock, jid, 'Pilih rentang waktu total chat warga:');
+        return true;
+    }
+
+    if (normalized === '/totalsesi') {
+        if (!isAdmin) {
+            await sock.sendMessage(jid, { text: 'Akses ditolak. Hanya admin yang bisa menggunakan /totalsesi.' });
+            return true;
+        }
+        setAdminSession(jid, { state: ADMIN_STATE.WAITING_STATS_RANGE, statsType: 'session' });
+        scheduleAdminFlowTimeout(sock, jid);
+        await sendStatsRangeMenu(sock, jid, 'Pilih rentang waktu total sesi warga:');
         return true;
     }
 
@@ -294,21 +715,21 @@ const handleAdminMessage = async (sock, msg, bodyText = '') => {
 
     if (session.state === ADMIN_STATE.SETTINGS_MENU) {
         if (text === '1') {
-            adminSessions.set(jid, { state: ADMIN_STATE.WAITING_SESSION_END_TEXT, timeoutId: session.timeoutId || null });
+            setAdminSession(jid, { state: ADMIN_STATE.WAITING_SESSION_END_TEXT });
             scheduleAdminFlowTimeout(sock, jid);
             await sock.sendMessage(jid, { text: 'Kirim teks baru untuk pesan penutup sesi warga.' });
             return true;
         }
 
         if (text === '2') {
-            adminSessions.set(jid, { state: ADMIN_STATE.WAITING_TIMEOUT_TEXT, timeoutId: session.timeoutId || null });
+            setAdminSession(jid, { state: ADMIN_STATE.WAITING_TIMEOUT_TEXT });
             scheduleAdminFlowTimeout(sock, jid);
             await sock.sendMessage(jid, { text: 'Kirim teks baru untuk pesan timeout sesi warga.' });
             return true;
         }
 
         if (text === '3') {
-            adminSessions.set(jid, { state: ADMIN_STATE.WAITING_TIMEOUT_SECONDS, timeoutId: session.timeoutId || null });
+            setAdminSession(jid, { state: ADMIN_STATE.WAITING_TIMEOUT_SECONDS });
             scheduleAdminFlowTimeout(sock, jid);
             await sock.sendMessage(jid, { text: 'Masukkan timeout sesi warga (detik), rentang 10-3600.' });
             return true;
@@ -316,7 +737,7 @@ const handleAdminMessage = async (sock, msg, bodyText = '') => {
 
         if (text === '4') {
             const mainMenu = getMainMenu(cmsData);
-            adminSessions.set(jid, { state: ADMIN_STATE.WAITING_MENU_TOGGLE, timeoutId: session.timeoutId || null });
+            setAdminSession(jid, { state: ADMIN_STATE.WAITING_MENU_TOGGLE });
             scheduleAdminFlowTimeout(sock, jid);
             await sock.sendMessage(jid, {
                 text: [
@@ -332,7 +753,7 @@ const handleAdminMessage = async (sock, msg, bodyText = '') => {
 
         if (text === '5') {
             const mainMenu = getMainMenu(cmsData);
-            adminSessions.set(jid, { state: ADMIN_STATE.WAITING_MENU_REORDER, timeoutId: session.timeoutId || null });
+            setAdminSession(jid, { state: ADMIN_STATE.WAITING_MENU_REORDER });
             scheduleAdminFlowTimeout(sock, jid);
             await sock.sendMessage(jid, {
                 text: [
@@ -346,8 +767,75 @@ const handleAdminMessage = async (sock, msg, bodyText = '') => {
             return true;
         }
 
+        if (text === '6') {
+            const mainChoices = getMainMenu(cmsData)
+                .filter((item) => item?.id)
+                .map((item) => ({ id: item.id, title: item.title || item.id }));
+            if (!mainChoices.length) {
+                await sock.sendMessage(jid, { text: 'Menu utama belum ada.' });
+                return true;
+            }
+
+            setAdminSession(jid, {
+                state: ADMIN_STATE.WAITING_FLOW_MAIN_MENU,
+                flowChoices: mainChoices,
+                targetSubMenuId: null,
+                flowAction: 'mode',
+            });
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, {
+                text: ['Pilih menu:', formatSimpleChoices(mainChoices)].join('\n\n'),
+            });
+            return true;
+        }
+
+        if (text === '8') {
+            const mainChoices = getMainMenu(cmsData)
+                .filter((item) => item?.id)
+                .filter((item) => hasAwaitReplyLeaf(cmsData, item.id))
+                .map((item) => ({ id: item.id, title: item.title || item.id }));
+            if (!mainChoices.length) {
+                await sock.sendMessage(jid, { text: 'Belum ada menu dengan mode butuh balasan.' });
+                return true;
+            }
+
+            setAdminSession(jid, {
+                state: ADMIN_STATE.WAITING_FLOW_MAIN_MENU,
+                flowChoices: mainChoices,
+                targetSubMenuId: null,
+                flowAction: 'success',
+            });
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, {
+                text: ['Pilih menu:', formatSimpleChoices(mainChoices)].join('\n\n'),
+            });
+            return true;
+        }
+
+        if (text === '7') {
+            const targets = getSubMenuSettingTargets(cmsData);
+            if (!targets.length) {
+                await sock.sendMessage(jid, { text: 'Belum ada submenu leaf yang bisa diatur.' });
+                return true;
+            }
+
+            setAdminSession(jid, { state: ADMIN_STATE.WAITING_FLOW_TARGET_TIMEOUT, targetList: targets, targetSubMenuId: null });
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, {
+                text: ['Pilih submenu untuk durasi:', '', formatSubMenuTargets(targets)].join('\n'),
+            });
+            return true;
+        }
+
+        if (text === '9') {
+            setAdminSession(jid, { state: ADMIN_STATE.WAITING_BOT_PP_IMAGE });
+            scheduleAdminFlowTimeout(sock, jid);
+            await sock.sendMessage(jid, { text: 'Kirim foto baru, atau ketik hapus.' });
+            return true;
+        }
+
         scheduleAdminFlowTimeout(sock, jid);
-        await sock.sendMessage(jid, { text: 'Pilihan tidak valid. Balas angka 1-5.' });
+        await sock.sendMessage(jid, { text: 'Pilihan tidak valid. Balas angka 1-9.' });
         return true;
     }
 

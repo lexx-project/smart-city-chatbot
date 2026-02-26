@@ -4,9 +4,11 @@ const {
     getTimeoutSeconds,
     getTimeoutText,
     getSessionEndText,
-    getLongInputTimeoutSeconds,
-    getLongInputMenuIds,
+    resolveMenuNode,
+    FLOW_MODE,
 } = require('../services/cmsService');
+const { isAdminJid } = require('../services/adminService');
+const { recordWargaChat, recordWargaSessionStart } = require('../services/analyticsService');
 const {
     sessions,
     registerAliasesForJid,
@@ -32,28 +34,6 @@ const sendTextMenu = async (sock, jid, textBlock, menuArray, session) => {
     session.currentOptions = optionsMap;
 
     await sock.sendMessage(jid, { text: message });
-};
-
-const resolveSubMenuResponse = (subMenus, menuId) => {
-    const menuData = subMenus?.[menuId];
-    if (!menuData) return null;
-
-    if (typeof menuData === 'string') {
-        return { text: menuData, hasNestedMenu: false };
-    }
-
-    const text = menuData.text || 'Silakan pilih opsi lanjutan:';
-    const nestedMenu = menuData.nextMenu;
-
-    if (Array.isArray(nestedMenu) && nestedMenu.length > 0) {
-        return {
-            text,
-            hasNestedMenu: true,
-            nestedMenu: nestedMenu.map((row) => ({ title: row.title, id: row.id })),
-        };
-    }
-
-    return { text, hasNestedMenu: false };
 };
 
 const endSession = async (sock, sessionKey, replyJid, sendTimeoutMessage = false, cmsData = null) => {
@@ -99,7 +79,10 @@ const processWargaInput = async (sock, msg, text, cmsData, session, sessionKey) 
     if (!jid) return { endSessionNow: false };
 
     if (session.awaitingTextFor) {
-        await sock.sendMessage(jid, { text: 'Berhasil. Data Anda sudah kami terima.' });
+        const successReply = session.awaitingTextFor.successReply || 'Berhasil. Data Anda sudah kami terima.';
+        await sock.sendMessage(jid, { text: successReply });
+        session.awaitingTextFor = null;
+        session.timeoutSeconds = getTimeoutSeconds(cmsData);
         await wait(2000);
         await sock.sendMessage(jid, { text: getSessionEndText(cmsData) });
         await endSession(sock, sessionKey, jid, false, cmsData);
@@ -116,26 +99,29 @@ const processWargaInput = async (sock, msg, text, cmsData, session, sessionKey) 
     }
 
     const inputId = hasPendingOptions ? session.currentOptions[text] : text;
-    const response = resolveSubMenuResponse(cmsData.subMenus, inputId);
+    const node = resolveMenuNode(cmsData, inputId);
 
-    if (!response) {
+    if (!node) {
         await sock.sendMessage(jid, {
             text: '❌ Pilihan tidak valid. Silakan pilih layanan yang tersedia.',
         });
         return { endSessionNow: false };
     }
 
-    if (response.hasNestedMenu) {
-        await sendTextMenu(sock, jid, response.text, response.nestedMenu, session);
+    if (node.kind === 'menu') {
+        await sendTextMenu(sock, jid, node.text, node.nextMenu, session);
         return { endSessionNow: false };
     }
 
     session.currentOptions = null;
-    await sock.sendMessage(jid, { text: response.text });
-    const longInputMenuIds = new Set(getLongInputMenuIds(cmsData));
-    if (longInputMenuIds.has(inputId)) {
-        session.awaitingTextFor = inputId;
-        session.timeoutSeconds = getLongInputTimeoutSeconds(cmsData);
+    await sock.sendMessage(jid, { text: node.text });
+
+    if (node.flowMode === FLOW_MODE.AWAIT_REPLY) {
+        session.awaitingTextFor = {
+            menuId: inputId,
+            successReply: node.successReply,
+        };
+        session.timeoutSeconds = node.awaitTimeoutSeconds;
         return { endSessionNow: false };
     }
 
@@ -161,7 +147,11 @@ const handleWargaMessage = async (sock, msg, bodyText = '') => {
     }
 
     const cmsData = await loadCmsData();
+    const isAdmin = await isAdminJid(jid, cmsData);
     const timeoutSeconds = getTimeoutSeconds(cmsData);
+    if (!isAdmin) {
+        await recordWargaChat();
+    }
 
     const sessionContext = await resolveSessionContext(jid);
     let { sessionKey, session } = sessionContext;
@@ -170,6 +160,9 @@ const handleWargaMessage = async (sock, msg, bodyText = '') => {
         session = createSession(sessionKey, timeoutSeconds);
         session.awaitingTextFor = null;
         registerAliasesForJid(sessionKey, jid, session);
+        if (!isAdmin) {
+            await recordWargaSessionStart();
+        }
 
         await sendGreetingAndMainMenu(sock, msg, cmsData, session);
         refreshSessionTimeout(sock, sessionKey, jid, session, timeoutSeconds, cmsData);
