@@ -1,72 +1,79 @@
-const { SUPERADMIN_JID } = require('../../settings');
-const { loadCmsData, saveCmsData } = require('./cmsService');
-const { jidLocal, resolveLidFromPhone, buildActorTokens } = require('./lidService');
+const nestClient = require('../api/nestClient');
 
-const isAdminJid = async (jid, cmsData) => {
-    if (!jid) return false;
-    const configuredAdmins = Array.isArray(cmsData?.adminJids) ? cmsData.adminJids : [];
-    const allowed = [SUPERADMIN_JID, ...configuredAdmins].filter(Boolean);
-    const actorTokens = await buildActorTokens(jid);
+const extractPhoneDigits = (value = '') => String(value).split('@')[0].replace(/\D/g, '');
 
-    for (const candidate of allowed) {
-        const candidateJid = String(candidate).trim();
-        if (!candidateJid) continue;
-        const candidateLocal = jidLocal(candidateJid);
-        if (actorTokens.has(candidateJid) || actorTokens.has(candidateLocal)) return true;
+const pickAdminList = (payload) => {
+    if (Array.isArray(payload)) return payload;
+    if (!payload || typeof payload !== 'object') return [];
+
+    const candidates = [payload.admins, payload.items, payload.results, payload.data];
+    for (const item of candidates) {
+        if (Array.isArray(item)) return item;
     }
 
-    return false;
+    return [];
 };
 
-const addAdminJid = async (targetJid) => {
-    const cmsData = await loadCmsData();
-    const current = Array.isArray(cmsData.adminJids) ? cmsData.adminJids : [];
-    if (!current.includes(targetJid)) current.push(targetJid);
+const toAdminValue = (entry) => {
+    if (typeof entry === 'string' || typeof entry === 'number') return String(entry).trim();
+    if (!entry || typeof entry !== 'object') return '';
 
-    const phoneDigits = jidLocal(targetJid);
-    const lid = await resolveLidFromPhone(phoneDigits);
-    if (lid) {
-        const lidJid = `${lid}@lid`;
-        if (!current.includes(lidJid)) current.push(lidJid);
-    }
+    const value =
+        entry.jid ||
+        entry.phone ||
+        entry.phoneNumber ||
+        entry.msisdn ||
+        entry.number ||
+        entry.whatsapp ||
+        entry.whatsappNumber ||
+        '';
 
-    cmsData.adminJids = current;
-    await saveCmsData(cmsData);
-    return cmsData.adminJids;
+    return String(value).trim();
 };
 
 const listAdminJids = async () => {
-    const cmsData = await loadCmsData();
-    const dynamicAdmins = Array.isArray(cmsData.adminJids) ? cmsData.adminJids : [];
-    return Array.from(new Set([SUPERADMIN_JID, ...dynamicAdmins]));
+    try {
+        const response = await nestClient.get('/bot-admins');
+        const list = pickAdminList(response?.data)
+            .map(toAdminValue)
+            .filter(Boolean);
+
+        return Array.from(new Set(list));
+    } catch (error) {
+        console.error('[ADMIN_LIST_API_ERROR]', error?.message || error);
+        return [];
+    }
 };
 
-const removeAdminJid = async (candidate) => {
-    const cmsData = await loadCmsData();
-    const current = Array.isArray(cmsData.adminJids) ? cmsData.adminJids : [];
-    if (!current.length) return { removed: false, remaining: current };
+const isAdminJid = async (jid) => {
+    const senderDigits = extractPhoneDigits(jid);
+    if (!senderDigits) return false;
 
-    const raw = String(candidate || '').trim();
-    const digits = raw.replace(/\D/g, '');
-    const targets = new Set();
+    const admins = await listAdminJids();
+    return admins.some((admin) => extractPhoneDigits(admin) === senderDigits);
+};
 
-    if (raw.includes('@')) targets.add(raw);
-    if (digits) {
-        targets.add(`${digits}@s.whatsapp.net`);
-        const lid = await resolveLidFromPhone(digits);
-        if (lid) targets.add(`${lid}@lid`);
+const getAdminSettings = async () => {
+    try {
+        const response = await nestClient.get('/bot-settings');
+        const payload = response?.data;
+
+        if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+            if (payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data)) {
+                return payload.data;
+            }
+            return payload;
+        }
+
+        return {};
+    } catch (error) {
+        console.error('[ADMIN_SETTINGS_API_ERROR]', error?.message || error);
+        return {};
     }
-
-    const next = current.filter((jid) => !targets.has(jid));
-    const removed = next.length !== current.length;
-    cmsData.adminJids = next;
-    await saveCmsData(cmsData);
-    return { removed, remaining: next };
 };
 
 module.exports = {
     isAdminJid,
-    addAdminJid,
+    getAdminSettings,
     listAdminJids,
-    removeAdminJid,
 };

@@ -7,7 +7,7 @@ const {
     resolveMenuNode,
     FLOW_MODE,
 } = require('../services/cmsService');
-const { isAdminJid } = require('../services/adminService');
+const { isAdminJid, getAdminSettings } = require('../services/adminService');
 const { recordWargaChat, recordWargaSessionStart } = require('../services/analyticsService');
 const {
     sessions,
@@ -19,6 +19,23 @@ const {
 } = require('../services/wargaSessionService');
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const pickTextSetting = (value, fallback) => {
+    const text = String(value || '').trim();
+    return text || fallback;
+};
+
+const resolveRuntimeSettings = (cmsData, apiSettings = {}) => {
+    const timeoutFromApi = Number.parseInt(String(apiSettings?.TIMEOUT_SEC || ''), 10);
+    const timeoutSeconds = Number.isInteger(timeoutFromApi) && timeoutFromApi > 0 ? timeoutFromApi : getTimeoutSeconds(cmsData);
+
+    return {
+        timeoutSeconds,
+        timeoutText: pickTextSetting(apiSettings?.TIMEOUT_TEXT, getTimeoutText(cmsData)),
+        sessionEndText: pickTextSetting(apiSettings?.SESSION_END_TEXT, getSessionEndText(cmsData)),
+        greetingMessage: pickTextSetting(apiSettings?.GREETING_MSG, String(cmsData?.greetingMessage || '').trim()),
+    };
+};
 
 const sendTextMenu = async (sock, jid, textBlock, menuArray, session) => {
     let message = `${textBlock}\n\n`;
@@ -36,27 +53,27 @@ const sendTextMenu = async (sock, jid, textBlock, menuArray, session) => {
     await sock.sendMessage(jid, { text: message });
 };
 
-const endSession = async (sock, sessionKey, replyJid, sendTimeoutMessage = false, cmsData = null) => {
+const endSession = async (sock, sessionKey, replyJid, sendTimeoutMessage = false, runtimeSettings = null) => {
     deleteSession(sessionKey);
 
     if (sendTimeoutMessage) {
-        await sock.sendMessage(replyJid, { text: getTimeoutText(cmsData) });
+        await sock.sendMessage(replyJid, { text: runtimeSettings?.timeoutText || 'Sesi berakhir karena timeout.' });
     }
 };
 
-const refreshSessionTimeout = (sock, sessionKey, jid, session, defaultTimeoutSeconds, cmsData) => {
+const refreshSessionTimeout = (sock, sessionKey, jid, session, defaultTimeoutSeconds, runtimeSettings) => {
     const timeoutSeconds = Number(session.timeoutSeconds) > 0 ? Number(session.timeoutSeconds) : defaultTimeoutSeconds;
 
     scheduleSessionTimeout(sessionKey, timeoutSeconds, async () => {
         try {
-            await endSession(sock, sessionKey, jid, true, cmsData);
+            await endSession(sock, sessionKey, jid, true, runtimeSettings);
         } catch (error) {
             console.error('[WARGA_TIMEOUT_ERROR]', error);
         }
     });
 };
 
-const sendGreetingAndMainMenu = async (sock, msg, cmsData, session) => {
+const sendGreetingAndMainMenu = async (sock, msg, cmsData, session, runtimeSettings) => {
     const jid = msg?.key?.remoteJid;
     if (!jid) return;
 
@@ -68,13 +85,13 @@ const sendGreetingAndMainMenu = async (sock, msg, cmsData, session) => {
         return;
     }
 
-    const greetingText = cmsData.greetingMessage ? `${cmsData.greetingMessage}\n\n` : '';
+    const greetingText = runtimeSettings?.greetingMessage ? `${runtimeSettings.greetingMessage}\n\n` : '';
     const mainText = `${greetingText}Silakan pilih layanan yang Anda butuhkan:`;
 
     await sendTextMenu(sock, jid, mainText, enabledMainMenu, session);
 };
 
-const processWargaInput = async (sock, msg, text, cmsData, session, sessionKey) => {
+const processWargaInput = async (sock, msg, text, cmsData, session, sessionKey, runtimeSettings) => {
     const jid = msg?.key?.remoteJid;
     if (!jid) return { endSessionNow: false };
 
@@ -82,10 +99,10 @@ const processWargaInput = async (sock, msg, text, cmsData, session, sessionKey) 
         const successReply = session.awaitingTextFor.successReply || 'Berhasil. Data Anda sudah kami terima.';
         await sock.sendMessage(jid, { text: successReply });
         session.awaitingTextFor = null;
-        session.timeoutSeconds = getTimeoutSeconds(cmsData);
+        session.timeoutSeconds = runtimeSettings.timeoutSeconds;
         await wait(2000);
-        await sock.sendMessage(jid, { text: getSessionEndText(cmsData) });
-        await endSession(sock, sessionKey, jid, false, cmsData);
+        await sock.sendMessage(jid, { text: runtimeSettings.sessionEndText });
+        await endSession(sock, sessionKey, jid, false, runtimeSettings);
         return { endSessionNow: true };
     }
 
@@ -126,8 +143,8 @@ const processWargaInput = async (sock, msg, text, cmsData, session, sessionKey) 
     }
 
     await wait(2000);
-    await sock.sendMessage(jid, { text: getSessionEndText(cmsData) });
-    await endSession(sock, sessionKey, jid, false, cmsData);
+    await sock.sendMessage(jid, { text: runtimeSettings.sessionEndText });
+    await endSession(sock, sessionKey, jid, false, runtimeSettings);
     return { endSessionNow: true };
 };
 
@@ -141,14 +158,16 @@ const handleWargaMessage = async (sock, msg, bodyText = '') => {
 
     if (normalizedText === '/setting') {
         await sock.sendMessage(jid, {
-            text: 'Akses ditolak. Fitur /setting hanya untuk admin.',
+            text: 'Command /setting sudah dinonaktifkan. Pengaturan dilakukan melalui Web Dashboard.',
         });
         return;
     }
 
     const cmsData = await loadCmsData();
-    const isAdmin = await isAdminJid(jid, cmsData);
-    const timeoutSeconds = getTimeoutSeconds(cmsData);
+    const [isAdmin, adminSettings] = await Promise.all([isAdminJid(jid), getAdminSettings()]);
+    const runtimeSettings = resolveRuntimeSettings(cmsData, adminSettings);
+    const timeoutSeconds = runtimeSettings.timeoutSeconds;
+
     if (!isAdmin) {
         await recordWargaChat();
     }
@@ -164,17 +183,17 @@ const handleWargaMessage = async (sock, msg, bodyText = '') => {
             await recordWargaSessionStart();
         }
 
-        await sendGreetingAndMainMenu(sock, msg, cmsData, session);
-        refreshSessionTimeout(sock, sessionKey, jid, session, timeoutSeconds, cmsData);
+        await sendGreetingAndMainMenu(sock, msg, cmsData, session, runtimeSettings);
+        refreshSessionTimeout(sock, sessionKey, jid, session, timeoutSeconds, runtimeSettings);
         return;
     }
 
     registerAliasesForJid(sessionKey, jid, session);
 
-    const result = await processWargaInput(sock, msg, text, cmsData, session, sessionKey);
+    const result = await processWargaInput(sock, msg, text, cmsData, session, sessionKey, runtimeSettings);
     if (result?.endSessionNow) return;
 
-    refreshSessionTimeout(sock, sessionKey, jid, session, timeoutSeconds, cmsData);
+    refreshSessionTimeout(sock, sessionKey, jid, session, timeoutSeconds, runtimeSettings);
 };
 
 module.exports = {
